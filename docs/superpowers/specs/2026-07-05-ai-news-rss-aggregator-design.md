@@ -156,9 +156,9 @@ Telegram HTML parse mode:
 
 ## 9. Hosting & scheduling — GitHub Actions
 
-- **Schedule:** cron with an explicit **IANA `TZ`** (GitHub Actions supports a
-  timezone in the schedule, so no manual UTC conversion). Default **~07:17 and
-  ~18:17** in the user's timezone.
+- **Schedule:** cron at **07:17 and 18:17 UTC**. GitHub Actions `schedule:` cron
+  is **always UTC — it does NOT accept a timezone**, so times are expressed
+  directly in UTC (no conversion, no DST handling).
   - **Off-peak minutes on purpose:** scheduled runs can be delayed at high load,
     *especially at the top of every hour*, and over-loaded jobs may be dropped.
     Avoid `:00`; treat delivery time as **approximate**, not punctual.
