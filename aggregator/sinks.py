@@ -114,6 +114,18 @@ class PermanentSendError(Exception):
     """A non-retryable 4xx. The article will never reach this target."""
 
 
+class TransientSendError(Exception):
+    """A 5xx or other retryable failure, sanitized like PermanentSendError.
+
+    httpx.HTTPStatusError's message embeds the full request URL — for
+    Telegram that's the bot token, for Discord/Slack the webhook secret.
+    This carries the same target name / status / body-snippet shape without
+    the URL, so a routine 503 doesn't leak credentials to the run log. It is
+    deliberately NOT a PermanentSendError: main.py must still retry the
+    article next run instead of abandoning it.
+    """
+
+
 def _url(target: Target) -> str:
     return _TG_API.format(token=target.token) if target.type == "telegram" else target.url
 
@@ -150,6 +162,14 @@ def send(
             raise PermanentSendError(
                 f"target {target.name!r}: HTTP {resp.status_code} {resp.text[:200]}"
             )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # exc's own message embeds the full request URL (token/webhook
+            # secret and all) — raise a clean one instead of letting it reach
+            # main.py's log.warning verbatim.
+            raise TransientSendError(
+                f"target {target.name!r}: HTTP {resp.status_code} {resp.text[:200]}"
+            ) from exc
         return
     raise RuntimeError(f"target {target.name!r}: rate limited after {max_retries} attempts")

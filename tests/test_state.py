@@ -41,6 +41,16 @@ def test_cap_applies_per_target_not_across_targets(tmp_path):
     assert state["quiet"] == quiet            # a busy target cannot evict a quiet one
 
 
+def test_max_ids_exceeds_the_measured_rss_window():
+    # 1308 is the real window size, reconstructed from this repo's history:
+    # the first production seed (2026-07-09, commit c94fa2c) wrote 1308 ids
+    # across the 14 live feeds, reproduced the same day after a manual reset.
+    # A cap below this number silently discards ids at seed time. Don't lower
+    # MAX_IDS without confronting this measurement.
+    measured_window = 1308
+    assert MAX_IDS > measured_window * 1.3
+
+
 def test_select_new_filters_seen():
     articles = [_article("1"), _article("2"), _article("3")]
     new = select_new(articles, ["2"])

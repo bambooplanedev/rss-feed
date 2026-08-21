@@ -69,9 +69,10 @@ Runs at **07:17 and 18:17 UTC** (`.github/workflows/aggregate.yml`). Scheduled
 runs can be delayed at high load, so treat times as approximate. Use the
 **Run workflow** button (workflow_dispatch) to trigger manually.
 
-> **First run** seeds every current feed item as "already seen" and posts
-> nothing — this avoids dumping the backlog. Only items published after the
-> first run are posted thereafter.
+> **First run** seeds each target's currently matched feed items (capped at
+> `MAX_IDS` per target) as "already seen" and posts nothing — this avoids
+> dumping the backlog. Only items published after the first run are posted
+> thereafter.
 
 ## Local development
 

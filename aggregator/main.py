@@ -11,7 +11,7 @@ from .config import load_feeds, load_targets
 from .fetch import fetch_feed
 from .models import Article, FeedSource
 from .parse import parse_feed
-from .state import load_state, save_state, select_new
+from .state import MAX_IDS, load_state, save_state, select_new
 
 log = logging.getLogger("aggregator")
 
@@ -63,7 +63,10 @@ def run(
             if target.name not in state and not dry_run:
                 state[target.name] = [a.id for a in matched]
                 save_state(state_path, state)
-                log.info("target %s: first run, seeded %d id(s)", target.name, len(matched))
+                log.info(
+                    "target %s: first run, seeded %d id(s)",
+                    target.name, len(state[target.name][-MAX_IDS:]),
+                )
                 continue
 
             queue = sorted(
@@ -105,8 +108,12 @@ def run(
                     else:
                         state[target.name].append(article.id)
                         count += 1
-                        if i < len(queue) - 1:
-                            sleep(sinks.SPECS[target.type].delay)
+
+                # Loop-scoped so it paces after a permanent failure too, not
+                # just a clean send. Guarded so dry-run doesn't idle, and a
+                # transient failure already `break`s out before this runs.
+                if not dry_run and i < len(queue) - 1:
+                    sleep(sinks.SPECS[target.type].delay)
 
             sent[target.name] = count
             if not dry_run:

@@ -291,8 +291,10 @@ def test_5xx_is_transient_not_permanent():
         return httpx.Response(503, text="down")
 
     with _client(handler) as client:
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(sinks.TransientSendError) as exc:
             sinks.send(_article(), _target("slack"), client)
+
+    assert not isinstance(exc.value, sinks.PermanentSendError)
 
 
 def test_permanent_error_message_does_not_leak_the_url():
@@ -303,6 +305,19 @@ def test_permanent_error_message_does_not_leak_the_url():
 
     with _client(handler) as client:
         with pytest.raises(sinks.PermanentSendError) as exc:
+            sinks.send(_article(), target, client)
+
+    assert "SUPERSECRET" not in str(exc.value)
+
+
+def test_transient_error_message_does_not_leak_the_url():
+    target = _target("discord", url="https://discord.com/api/webhooks/1/SUPERSECRET")
+
+    def handler(request):
+        return httpx.Response(503, text="down")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.TransientSendError) as exc:
             sinks.send(_article(), target, client)
 
     assert "SUPERSECRET" not in str(exc.value)

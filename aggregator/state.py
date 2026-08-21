@@ -4,10 +4,12 @@ from pathlib import Path
 from .models import Article
 
 # Per target, not per file: a shared cap would let a busy target evict a quiet
-# target's ids and cause silent reposts. state.json is committed back to the
-# repo twice a day, so the number stays small — dedup only has to outlive the
-# RSS window (~700 ids in flight across 14 feeds).
-MAX_IDS = 500
+# target's ids and cause silent reposts. The cap must exceed the RSS window
+# with headroom: the measured window is 1308 ids across the current 14 feeds
+# (first production seed, 2026-07-09). A cap below the window discards ids at
+# seed time, so select_new finds hundreds of "new" articles that were really
+# already published, and a channel reposts its backlog indefinitely.
+MAX_IDS = 2000
 
 
 def load_state(path: str) -> dict[str, list[str]]:

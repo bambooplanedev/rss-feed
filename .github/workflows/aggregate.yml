@@ -37,6 +37,11 @@ jobs:
         run: python -m aggregator.main --tz UTC
 
       - name: Commit updated state
+        # main.py exits 1 when any target failed/was skipped, so this step
+        # defaults to if: success() and gets skipped — state.json (with the
+        # progress the successful targets made) would never be committed,
+        # and the next run would re-deliver everything already sent.
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -158,6 +158,16 @@ def test_tz_defaults_and_overrides(tmp_path):
     assert str(targets[1].tz) == "Europe/Kyiv"
 
 
+def test_load_shipped_targets_yaml(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+
+    targets, skipped = load_targets("targets.yaml")
+
+    assert [t.name for t in targets] == ["tg-main"]
+    assert skipped == []
+
+
 def test_filters_default_to_empty_and_become_tuples(tmp_path):
     path = _write(tmp_path, (
         "targets:\n"
