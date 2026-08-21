@@ -17,6 +17,7 @@
 - Telegram output must not change by a single character. `tests/test_sinks.py` carries a regression test asserting the exact current `format.py` output.
 - Error messages about configuration name the **environment variable**, never its value. Secrets must never reach a log line or an exception message.
 - `MAX_IDS = 500` per target, `MAX_SENDS_PER_RUN = 20` per target per run.
+- **`state.json` at the repo root is live production data** (2000 ids, ~115 KB, rewritten twice daily by the workflow). Never edit it, never delete it, and never point a test or a manual run at it — always use `tmp_path` or an explicit throwaway `--state` path.
 - Send delays are fixed per type and are derived from real service limits: telegram `3.5`, discord `2.0`, slack `1.2`, webhook `0.0`. Do not "round them off".
 - Every task ends with a commit. Tests must pass before each commit.
 
@@ -1002,7 +1003,9 @@ git commit -m "feat: load_targets with env resolution and two-tier config valida
   - `select_new(articles, seen_ids)` — unchanged.
   - `MAX_IDS = 500`.
 
-There is deliberately **no migration**. `state.json` is not tracked in the repo and does not exist locally — the aggregator has never run in production, so there is no old-format file anywhere to migrate.
+There is deliberately **no migration**, and this is a decision rather than an absence of data. The aggregator has been running in production since 2026-07-09; `state.json` is tracked and holds 2000 ids in the old flat `{"seen": [...]}` shape. We are not carrying them over: Telegram takes the same seed path as any new target, at the cost of one skipped 12-hour news window, and we avoid ~10 lines plus tests that would run exactly once in the project's life. `save_state` rewrites the whole document, so the `seen` key disappears after the first run.
+
+**Do not add a `migrate_state` function.** If a reviewer flags the missing migration, the answer is this paragraph.
 
 The cap is per target on purpose: a shared cap would let a busy target evict a quiet target's ids and cause silent reposts. 500 is chosen because `state.json` is committed back to the repo twice a day and dedup only has to outlive the RSS window (~700 ids in flight across 14 feeds).
 
@@ -1558,7 +1561,15 @@ targets:
 TELEGRAM_BOT_TOKEN=x TELEGRAM_CHAT_ID=1 .venv/bin/python -m aggregator.main --dry-run --state /tmp/nonexistent-state.json 2>&1 | head -30
 ```
 
-Expected: real article previews, each line prefixed `[tg-main]`, no network sends, and no `state.json` written. This exercises the fresh-checkout dry-run path from spec §9.
+Expected: real article previews, each line prefixed `[tg-main]`, no network sends, and no state file written at the throwaway path. This exercises the fresh-checkout dry-run path from spec §9.
+
+Then confirm the repo's live `state.json` was not touched:
+
+```bash
+git status --porcelain state.json
+```
+
+Expected: no output.
 
 Then confirm a missing secret degrades rather than crashes:
 
