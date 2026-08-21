@@ -30,6 +30,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Uncomment alongside the matching entry in targets.yaml:
+          # DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
         run: python -m aggregator.main --tz UTC
 
       - name: Commit updated state
