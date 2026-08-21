@@ -1,22 +1,26 @@
 import argparse
 import logging
-import os
+import sys
 import time
 from datetime import datetime, timezone
 
 import httpx
 
-from .config import load_feeds
+from . import sinks
+from .config import load_feeds, load_targets
 from .fetch import fetch_feed
-from .format import format_message
 from .models import Article, FeedSource
 from .parse import parse_feed
 from .state import load_state, save_state, select_new
-from .telegram import send_message
 
 log = logging.getLogger("aggregator")
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+# Widening a filter (tiers: [1] -> [1, 2]) can make a hundred old articles
+# "new" at once. The remainder arrives on the next run 12 hours later, which
+# is the behaviour we want anyway.
+MAX_SENDS_PER_RUN = 20
 
 
 def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> list[Article]:
@@ -33,73 +37,110 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> list[Arti
 def run(
     *,
     feeds_path: str,
+    targets_path: str,
     state_path: str,
-    token: str,
-    chat_id: str,
     tz: str = "UTC",
     dry_run: bool = False,
-    send_delay: float = 3.5,
-) -> int:
-    if not dry_run and (not token or not chat_id):
-        raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (or use --dry-run)")
+    sleep=time.sleep,
+) -> tuple[dict[str, int], list[str]]:
+    # A malformed config raises here, before any feed is fetched. A target
+    # whose ${VAR} is unset is skipped instead, so a rotated Slack secret
+    # cannot silence Telegram.
+    targets, skipped = load_targets(targets_path, tz)
     feeds = load_feeds(feeds_path)
+
     with httpx.Client() as client:
         articles = collect_articles(feeds, client)
 
-    seen = load_state(state_path)
-    if seen is None:
-        # First run: seed everything as seen, post nothing.
-        if not dry_run:
-            save_state(state_path, [a.id for a in articles])
-        log.info("first run: seeded %d ids, posted nothing", len(articles))
-        return 0
+    state = load_state(state_path)
+    failed: list[str] = list(skipped)
+    sent: dict[str, int] = {}
 
-    new = select_new(articles, seen)
-    new.sort(key=lambda a: a.published or _EPOCH)
-
-    posted_ids = list(seen)
-    sent_count = 0
     with httpx.Client() as client:
-        for i, article in enumerate(new):
-            text = format_message(article, tz)
-            if dry_run:
-                print(text)
-                print("---")
-                sent_count += 1
-                continue
-            try:
-                send_message(text, token, chat_id, client)
-            except Exception as exc:  # noqa: BLE001 - isolate a failing send; unsent ids retry next run
-                log.warning("send failed for %s (%s); stopping this run", article.url, exc)
-                break
-            posted_ids.append(article.id)
-            sent_count += 1
-            if i < len(new) - 1:
-                time.sleep(send_delay)
+        for target in targets:
+            matched = [a for a in articles if target.matches(a)]
 
-    if not dry_run:
-        save_state(state_path, posted_ids)
-    log.info("%sposted %d new article(s)", "[dry-run] would have " if dry_run else "", sent_count)
-    return sent_count
+            if target.name not in state and not dry_run:
+                state[target.name] = [a.id for a in matched]
+                save_state(state_path, state)
+                log.info("target %s: first run, seeded %d id(s)", target.name, len(matched))
+                continue
+
+            queue = sorted(
+                select_new(matched, state.get(target.name, [])),
+                key=lambda a: a.published or _EPOCH,
+            )
+            if len(queue) > MAX_SENDS_PER_RUN:
+                log.info(
+                    "target %s: %d queued, sending %d, rest next run",
+                    target.name, len(queue), MAX_SENDS_PER_RUN,
+                )
+                queue = queue[:MAX_SENDS_PER_RUN]
+
+            count = 0
+            for i, article in enumerate(queue):
+                if dry_run:
+                    print(f"[{target.name}] {sinks.preview(article, target)}")
+                    print("---")
+                    count += 1
+                else:
+                    try:
+                        sinks.send(article, target, client)
+                    except sinks.PermanentSendError as exc:
+                        # Recording the id is the point: leaving it in the queue
+                        # would block every later article for this target forever.
+                        log.error(
+                            "target %s: permanent failure on %s (%s); skipping article",
+                            target.name, article.url, exc,
+                        )
+                        failed.append(target.name)
+                        state[target.name].append(article.id)
+                    except Exception as exc:  # noqa: BLE001 - transient; retry next run
+                        log.warning(
+                            "target %s: transient failure on %s (%s); rest next run",
+                            target.name, article.url, exc,
+                        )
+                        failed.append(target.name)
+                        break
+                    else:
+                        state[target.name].append(article.id)
+                        count += 1
+                if i < len(queue) - 1:
+                    sleep(sinks.SPECS[target.type].delay)
+
+            sent[target.name] = count
+            if not dry_run:
+                save_state(state_path, state)
+
+    return sent, failed
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="AI news RSS → Telegram aggregator")
+    parser = argparse.ArgumentParser(description="AI news RSS → messenger aggregator")
     parser.add_argument("--dry-run", action="store_true", help="print messages, do not send or persist")
     parser.add_argument("--feeds", default="feeds.yaml")
+    parser.add_argument("--targets", default="targets.yaml")
     parser.add_argument("--state", default="state.json")
     parser.add_argument("--tz", default="UTC")
     args = parser.parse_args()
 
-    run(
+    sent, failed = run(
         feeds_path=args.feeds,
+        targets_path=args.targets,
         state_path=args.state,
-        token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-        chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
         tz=args.tz,
         dry_run=args.dry_run,
     )
+
+    prefix = "[dry-run] would have " if args.dry_run else ""
+    for name, count in sent.items():
+        log.info("%starget %s: %d message(s)", prefix, name, count)
+    if failed:
+        # Exit non-zero so a dead target shows up as a red workflow run
+        # instead of a green one that quietly delivers nothing.
+        log.error("target(s) with failures: %s", ", ".join(sorted(set(failed))))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

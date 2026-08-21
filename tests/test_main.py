@@ -1,131 +1,199 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 import aggregator.main as m
-from aggregator.models import Article, FeedSource
+from aggregator.models import Article
+from aggregator.sinks import PermanentSendError
+from aggregator.state import load_state, save_state
+
+FEEDS = "feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n"
 
 
-def _article(id_, hour):
+def _article(id_, hour=9, tier=1, tag="s"):
     return Article(
         id=id_, title=f"T{id_}", url=f"https://ex.com/{id_}", source="S",
-        tag="s", tier=1, published=datetime(2026, 7, 2, hour, tzinfo=timezone.utc), summary="",
+        tag=tag, tier=tier,
+        published=datetime(2026, 7, 2, hour, tzinfo=timezone.utc), summary="",
     )
 
 
-def test_first_run_seeds_and_posts_nothing(tmp_path, monkeypatch):
-    state = str(tmp_path / "state.json")
-    feeds_file = tmp_path / "feeds.yaml"
-    feeds_file.write_text("feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n")
+def _setup(tmp_path, targets_yaml, articles, monkeypatch):
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(targets_yaml, encoding="utf-8")
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: articles)
+    return dict(
+        feeds_path=str(tmp_path / "feeds.yaml"),
+        targets_path=str(tmp_path / "targets.yaml"),
+        state_path=str(tmp_path / "state.json"),
+        sleep=lambda _: None,
+    )
 
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [_article("a", 9), _article("b", 10)])
+
+TWO_TARGETS = (
+    "targets:\n"
+    "  - name: core\n    type: discord\n    url: https://ex.com/core\n    tiers: [1]\n"
+    "  - name: all\n    type: slack\n    url: https://ex.com/all\n"
+)
+
+
+def test_new_target_is_seeded_and_sends_nothing(tmp_path, monkeypatch):
+    kw = _setup(tmp_path, TWO_TARGETS, [_article("a"), _article("b")], monkeypatch)
     sent = []
-    monkeypatch.setattr(m, "send_message", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
-    posted = m.run(feeds_path=str(feeds_file), state_path=state,
-                   token="T", chat_id="1", send_delay=0)
+    counts, failed = m.run(**kw)
 
-    assert posted == 0
     assert sent == []
-    # state now seeded with both ids
-    from aggregator.state import load_state
-    assert set(load_state(state)) == {"a", "b"}
+    assert counts == {}
+    assert failed == []
+    assert set(load_state(kw["state_path"])["core"]) == {"a", "b"}
 
 
-def test_second_run_posts_only_new_in_time_order(tmp_path, monkeypatch):
-    state = str(tmp_path / "state.json")
-    feeds_file = tmp_path / "feeds.yaml"
-    feeds_file.write_text("feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n")
-
-    from aggregator.state import save_state
-    save_state(state, ["a"])  # 'a' already seen
-
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [_article("c", 10), _article("b", 9), _article("a", 8)])
+def test_filters_route_different_articles_to_different_targets(tmp_path, monkeypatch):
+    articles = [_article("t1", tier=1), _article("t3", tier=3)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": [], "all": []})
     sent = []
-    monkeypatch.setattr(m, "send_message", lambda text, token, chat_id, client, **k: sent.append(text))
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
-    posted = m.run(feeds_path=str(feeds_file), state_path=state,
-                   token="T", chat_id="1", send_delay=0)
+    m.run(**kw)
 
-    assert posted == 2
-    # oldest-first: b (09:00) before c (10:00)
-    assert "T" + "b" in sent[0]
-    assert "T" + "c" in sent[1]
-    from aggregator.state import load_state
-    assert set(load_state(state)) == {"a", "b", "c"}
+    assert sorted(sent) == [("all", "t1"), ("all", "t3"), ("core", "t1")]
 
 
-def test_dry_run_does_not_send_or_persist(tmp_path, monkeypatch, capsys):
-    state = str(tmp_path / "state.json")
-    feeds_file = tmp_path / "feeds.yaml"
-    feeds_file.write_text("feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n")
-    from aggregator.state import save_state
-    save_state(state, ["a"])
+def test_articles_are_fetched_once_for_all_targets(tmp_path, monkeypatch):
+    calls = {"n": 0}
 
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [_article("b", 9)])
+    def counting_collect(feeds, client):
+        calls["n"] += 1
+        return [_article("a")]
+
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
+    monkeypatch.setattr(m, "collect_articles", counting_collect)
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+    state_path = str(tmp_path / "state.json")
+    save_state(state_path, {"core": [], "all": []})
+
+    m.run(feeds_path=str(tmp_path / "feeds.yaml"),
+          targets_path=str(tmp_path / "targets.yaml"),
+          state_path=state_path, sleep=lambda _: None)
+
+    assert calls["n"] == 1
+
+
+def test_transient_failure_stops_one_target_and_spares_the_others(tmp_path, monkeypatch):
+    articles = [_article("a", 9), _article("b", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": [], "all": []})
     sent = []
-    monkeypatch.setattr(m, "send_message", lambda *a, **k: sent.append(a))
 
-    posted = m.run(feeds_path=str(feeds_file), state_path=state,
-                   token="T", chat_id="1", dry_run=True, send_delay=0)
+    def flaky(article, target, client):
+        if target.name == "core":
+            raise RuntimeError("service down")
+        sent.append((target.name, article.id))
 
-    assert posted == 1
-    assert sent == []                       # nothing actually sent
-    from aggregator.state import load_state
-    assert set(load_state(state)) == {"a"}  # state unchanged
-    assert "T" + "b" in capsys.readouterr().out
+    monkeypatch.setattr(m.sinks, "send", flaky)
 
+    counts, failed = m.run(**kw)
 
-def test_collect_articles_isolates_failing_feed(monkeypatch):
-    good = FeedSource(name="Good", url="https://good/feed", tag="g", tier=1)
-    bad = FeedSource(name="Bad", url="https://bad/feed", tag="b", tier=1)
-
-    def fake_fetch(url, client):
-        if "bad" in url:
-            raise RuntimeError("boom")
-        return b"<rss></rss>"
-
-    monkeypatch.setattr(m, "fetch_feed", fake_fetch)
-    monkeypatch.setattr(m, "parse_feed", lambda content, source: [_article("x", 9)])
-
-    import httpx
-    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as client:
-        out = m.collect_articles([good, bad], client)
-    assert len(out) == 1  # bad feed skipped, good feed kept
+    state = load_state(kw["state_path"])
+    assert state["core"] == []                     # nothing recorded: retry next run
+    assert set(state["all"]) == {"a", "b"}         # the other target is unaffected
+    assert counts["all"] == 2
+    assert "core" in failed
 
 
-def test_failed_send_isolated_and_progress_persisted(tmp_path, monkeypatch):
-    state = str(tmp_path / "state.json")
-    feeds_file = tmp_path / "feeds.yaml"
-    feeds_file.write_text("feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n")
+def test_permanent_failure_does_not_block_the_queue(tmp_path, monkeypatch):
+    """A deleted webhook must not poison every later article for that target."""
+    articles = [_article("bad", 9), _article("good", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": [], "all": []})
+    sent = []
 
-    from aggregator.state import save_state
-    save_state(state, ["a"])  # 'a' already seen
+    def picky(article, target, client):
+        if target.name == "core" and article.id == "bad":
+            raise PermanentSendError("404")
+        sent.append((target.name, article.id))
 
-    monkeypatch.setattr(
-        m, "collect_articles",
-        lambda feeds, client: [_article("b", 9), _article("c", 10), _article("d", 11)],
+    monkeypatch.setattr(m.sinks, "send", picky)
+
+    counts, failed = m.run(**kw)
+
+    assert ("core", "good") in sent                # the queue kept moving
+    assert set(load_state(kw["state_path"])["core"]) == {"bad", "good"}
+    assert counts["core"] == 1                     # 'bad' is recorded but not counted as sent
+    assert "core" in failed
+
+
+def test_send_cap_leaves_the_remainder_for_the_next_run(tmp_path, monkeypatch):
+    articles = [_article(f"a{i}", hour=9) for i in range(m.MAX_SENDS_PER_RUN + 5)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": [], "all": []})
+    sent = []
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
+
+    counts, _ = m.run(**kw)
+
+    assert counts["core"] == m.MAX_SENDS_PER_RUN
+    assert len(load_state(kw["state_path"])["core"]) == m.MAX_SENDS_PER_RUN
+
+
+def test_unset_env_in_one_target_does_not_reduce_the_others(tmp_path, monkeypatch):
+    monkeypatch.delenv("GONE_HOOK", raising=False)
+    targets = (
+        "targets:\n"
+        "  - name: dead\n    type: discord\n    url: ${GONE_HOOK}\n"
+        "  - name: alive\n    type: slack\n    url: https://ex.com/alive\n"
     )
+    kw = _setup(tmp_path, targets, [_article("a"), _article("b")], monkeypatch)
+    save_state(kw["state_path"], {"alive": []})
+    sent = []
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
-    calls = []
+    counts, failed = m.run(**kw)
 
-    def fake_send(text, token, chat_id, client, **k):
-        calls.append(text)
-        if len(calls) == 2:
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(m, "send_message", fake_send)
-
-    posted = m.run(feeds_path=str(feeds_file), state_path=state,
-                    token="T", chat_id="1", send_delay=0)
-
-    assert posted == 1
-    from aggregator.state import load_state
-    assert set(load_state(state)) == {"a", "b"}
-    assert "c" not in load_state(state)
-    assert "d" not in load_state(state)
+    assert counts["alive"] == 2                    # the working target delivered in full
+    assert failed == ["dead"]
 
 
-def test_run_requires_credentials_unless_dry_run():
+def test_state_is_saved_after_each_target(tmp_path, monkeypatch):
+    """Process death mid-run must not cost the targets that already finished."""
+    articles = [_article("a")]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": [], "all": []})
+
+    def send_then_die(article, target, client):
+        if target.name == "all":
+            raise KeyboardInterrupt("runner evicted")
+
+    monkeypatch.setattr(m.sinks, "send", send_then_die)
+
+    with pytest.raises(KeyboardInterrupt):
+        m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"] == ["a"]
+
+
+def test_dry_run_prints_with_target_prefix_and_persists_nothing(tmp_path, monkeypatch, capsys):
+    kw = _setup(tmp_path, TWO_TARGETS, [_article("a")], monkeypatch)
+
+    def explode(*a, **k):
+        raise AssertionError("dry-run must not send")
+
+    monkeypatch.setattr(m.sinks, "send", explode)
+
+    m.run(**kw, dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "[core]" in out and "[all]" in out
+    import os
+    assert not os.path.exists(kw["state_path"])
+
+
+def test_dry_run_validates_the_config(tmp_path, monkeypatch):
+    kw = _setup(tmp_path, "targets:\n  - name: x\n    type: nope\n    url: u\n", [], monkeypatch)
     with pytest.raises(ValueError):
-        m.run(feeds_path="feeds.yaml", state_path="unused", token="", chat_id="", send_delay=0)
+        m.run(**kw, dry_run=True)
