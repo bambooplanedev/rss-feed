@@ -136,3 +136,173 @@ def test_preview_returns_the_text_for_rendered_types():
 def test_preview_returns_pretty_json_for_webhook():
     out = sinks.preview(_article(), _target("webhook"))
     assert json.loads(out)["id"] == "1"
+
+
+import httpx
+
+
+def _client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_send_posts_to_the_telegram_bot_url():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("telegram"), client)
+
+    assert seen["url"] == "https://api.telegram.org/botTOKEN/sendMessage"
+    assert seen["body"]["chat_id"] == "123"
+    assert seen["body"]["parse_mode"] == "HTML"
+
+
+@pytest.mark.parametrize("type_", ["discord", "slack", "webhook"])
+def test_send_posts_to_the_configured_url(type_):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target(type_), client)
+
+    assert seen["url"] == "https://ex.com/hook"
+
+
+def test_retries_on_telegram_429_reading_the_body():
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"parameters": {"retry_after": 7}})
+        return httpx.Response(200, json={"ok": True})
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("telegram"), client, sleep=slept.append)
+
+    assert calls["n"] == 2
+    assert slept == [7.0]
+
+
+def test_retries_on_discord_429_reading_the_body():
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"retry_after": 2.5})
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("discord"), client, sleep=slept.append)
+
+    assert slept == [2.5]
+
+
+def test_retries_on_slack_429_reading_the_header():
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"})
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("slack"), client, sleep=slept.append)
+
+    assert slept == [3.0]
+
+
+def test_html_429_body_falls_back_to_one_second():
+    """Discord sits behind Cloudflare, which answers 429 with HTML, not JSON."""
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="<html>rate limited</html>")
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("discord"), client, sleep=slept.append)
+
+    assert slept == [1.0]
+
+
+def test_absurd_retry_after_is_clamped():
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "86400"})
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("slack"), client, sleep=slept.append)
+
+    assert slept == [60.0]
+
+
+def test_http_date_retry_after_falls_back_to_one_second():
+    calls, slept = {"n": 0}, []
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+        return httpx.Response(200)
+
+    with _client(handler) as client:
+        sinks.send(_article(), _target("slack"), client, sleep=slept.append)
+
+    assert slept == [1.0]
+
+
+def test_exhausted_retries_raise_runtime_error():
+    def handler(request):
+        return httpx.Response(429, json={"retry_after": 1})
+
+    with _client(handler) as client:
+        with pytest.raises(RuntimeError):
+            sinks.send(_article(), _target("discord"), client, sleep=lambda _: None)
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 422])
+def test_non_429_4xx_is_permanent(status):
+    def handler(request):
+        return httpx.Response(status, text="nope")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.PermanentSendError):
+            sinks.send(_article(), _target("discord"), client)
+
+
+def test_5xx_is_transient_not_permanent():
+    def handler(request):
+        return httpx.Response(503, text="down")
+
+    with _client(handler) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            sinks.send(_article(), _target("slack"), client)
+
+
+def test_permanent_error_message_does_not_leak_the_url():
+    target = _target("discord", url="https://discord.com/api/webhooks/1/SUPERSECRET")
+
+    def handler(request):
+        return httpx.Response(404, text="not found")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.PermanentSendError) as exc:
+            sinks.send(_article(), target, client)
+
+    assert "SUPERSECRET" not in str(exc.value)

@@ -1,6 +1,7 @@
 import html
 import json
 import re
+import time
 from dataclasses import asdict
 from typing import Any, Callable, NamedTuple
 
@@ -103,3 +104,52 @@ def preview(article: Article, target: Target) -> str:
     body = payload(article, target)
     key = SPECS[target.type].key
     return body[key] if key else json.dumps(body, ensure_ascii=False, indent=2)
+
+
+MAX_RETRIES = 3
+MAX_BACKOFF = 60.0
+
+
+class PermanentSendError(Exception):
+    """A non-retryable 4xx. The article will never reach this target."""
+
+
+def _url(target: Target) -> str:
+    return _TG_API.format(token=target.token) if target.type == "telegram" else target.url
+
+
+def _backoff(spec: Spec, resp: httpx.Response) -> float:
+    # The extractor itself can throw: Cloudflare answers 429 with HTML, and
+    # Retry-After is legally allowed to be an HTTP-date. Either way, wait a
+    # second rather than turning a retryable 429 into a hard failure.
+    try:
+        return min(float(spec.retry_after(resp)), MAX_BACKOFF)
+    except Exception:
+        return 1.0
+
+
+def send(
+    article: Article,
+    target: Target,
+    client: httpx.Client,
+    *,
+    sleep=time.sleep,
+    max_retries: int = MAX_RETRIES,
+) -> None:
+    spec = SPECS[target.type]
+    url = _url(target)
+    body = payload(article, target)
+    for _ in range(max_retries):
+        resp = client.post(url, json=body, timeout=20.0)
+        if resp.status_code == 429:
+            sleep(_backoff(spec, resp))
+            continue
+        if 400 <= resp.status_code < 500:
+            # Deleted webhook, revoked token, unparseable entities: retrying
+            # forever would block every later article for this target.
+            raise PermanentSendError(
+                f"target {target.name!r}: HTTP {resp.status_code} {resp.text[:200]}"
+            )
+        resp.raise_for_status()
+        return
+    raise RuntimeError(f"target {target.name!r}: rate limited after {max_retries} attempts")
