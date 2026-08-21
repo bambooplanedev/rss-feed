@@ -197,3 +197,69 @@ def test_dry_run_validates_the_config(tmp_path, monkeypatch):
     kw = _setup(tmp_path, "targets:\n  - name: x\n    type: nope\n    url: u\n", [], monkeypatch)
     with pytest.raises(ValueError):
         m.run(**kw, dry_run=True)
+
+
+def test_collect_articles_isolates_failing_feed(monkeypatch):
+    from aggregator.models import FeedSource
+
+    feeds = [
+        FeedSource(name="bad", url="https://ex.com/bad", tag="s", tier=1),
+        FeedSource(name="good", url="https://ex.com/good", tag="s", tier=1),
+    ]
+    good_articles = [_article("g1")]
+
+    def fake_fetch(url, client):
+        if url == "https://ex.com/bad":
+            raise RuntimeError("connection reset")
+        return b"content"
+
+    def fake_parse(content, source):
+        return good_articles if source.name == "good" else []
+
+    monkeypatch.setattr(m, "fetch_feed", fake_fetch)
+    monkeypatch.setattr(m, "parse_feed", fake_parse)
+
+    articles = m.collect_articles(feeds, client=None)
+
+    assert articles == good_articles
+
+
+def test_main_exits_nonzero_when_a_target_fails(tmp_path, monkeypatch):
+    monkeypatch.delenv("GONE_HOOK", raising=False)
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(
+        "targets:\n  - name: dead\n    type: discord\n    url: ${GONE_HOOK}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "aggregator",
+            "--feeds", str(tmp_path / "feeds.yaml"),
+            "--targets", str(tmp_path / "targets.yaml"),
+            "--state", str(tmp_path / "state.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        m.main()
+
+    assert exc_info.value.code == 1
+
+
+def test_main_does_not_exit_on_a_clean_run(tmp_path, monkeypatch):
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "aggregator",
+            "--feeds", str(tmp_path / "feeds.yaml"),
+            "--targets", str(tmp_path / "targets.yaml"),
+            "--state", str(tmp_path / "state.json"),
+        ],
+    )
+
+    m.main()  # must not raise SystemExit

@@ -105,8 +105,8 @@ def run(
                     else:
                         state[target.name].append(article.id)
                         count += 1
-                if i < len(queue) - 1:
-                    sleep(sinks.SPECS[target.type].delay)
+                        if i < len(queue) - 1:
+                            sleep(sinks.SPECS[target.type].delay)
 
             sent[target.name] = count
             if not dry_run:
