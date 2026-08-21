@@ -4,6 +4,8 @@ from pathlib import Path
 from aggregator.models import FeedSource
 from aggregator.parse import parse_feed, normalize_url, clean_summary
 
+TESTS_DIR = Path(__file__).parent
+
 SOURCE = FeedSource(name="Test Source", url="https://ex.com/feed", tag="test", tier=1)
 FIX = Path("tests/fixtures")
 
@@ -52,3 +54,13 @@ def test_normalize_url_strips_tracking_trailing_slash_and_fragment():
         normalize_url("https://Ex.com/Path/?utm_source=x&id=5#frag")
         == "https://ex.com/Path?id=5"
     )
+
+
+def test_parse_feed_copies_tier_from_source():
+    source = FeedSource(name="S", url="https://ex.com/feed", tag="s", tier=3)
+    content = (TESTS_DIR / "fixtures" / "rss_sample.xml").read_bytes()
+
+    articles = parse_feed(content, source)
+
+    assert articles
+    assert all(a.tier == 3 for a in articles)

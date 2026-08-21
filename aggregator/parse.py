@@ -77,6 +77,7 @@ def parse_feed(content: bytes, source: FeedSource) -> list[Article]:
                 url=url,
                 source=source.name,
                 tag=source.tag,
+                tier=source.tier,
                 published=_published(entry),
                 summary=clean_summary(entry.get("summary", "")),
             )

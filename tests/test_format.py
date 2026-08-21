@@ -7,7 +7,7 @@ from aggregator.format import format_message
 def _article(**kw):
     base = dict(
         id="1", title="Big <AI> News", url="https://ex.com/a",
-        source="TechCrunch", tag="techcrunch",
+        source="TechCrunch", tag="techcrunch", tier=1,
         published=datetime(2026, 7, 2, 9, 5, tzinfo=timezone.utc),
         summary="A & B happened",
     )

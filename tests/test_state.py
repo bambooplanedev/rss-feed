@@ -7,7 +7,7 @@ from aggregator.state import load_state, save_state, select_new, MAX_IDS
 def _article(id_):
     return Article(
         id=id_, title="t", url="https://ex.com/" + id_, source="s",
-        tag="x", published=datetime.now(timezone.utc), summary="",
+        tag="x", tier=1, published=datetime.now(timezone.utc), summary="",
     )
 
 

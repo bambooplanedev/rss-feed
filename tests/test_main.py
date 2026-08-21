@@ -9,7 +9,7 @@ from aggregator.models import Article, FeedSource
 def _article(id_, hour):
     return Article(
         id=id_, title=f"T{id_}", url=f"https://ex.com/{id_}", source="S",
-        tag="s", published=datetime(2026, 7, 2, hour, tzinfo=timezone.utc), summary="",
+        tag="s", tier=1, published=datetime(2026, 7, 2, hour, tzinfo=timezone.utc), summary="",
     )
 
 
