@@ -3,20 +3,24 @@ from pathlib import Path
 
 from .models import Article
 
-MAX_IDS = 2000
+# Per target, not per file: a shared cap would let a busy target evict a quiet
+# target's ids and cause silent reposts. state.json is committed back to the
+# repo twice a day, so the number stays small — dedup only has to outlive the
+# RSS window (~700 ids in flight across 14 feeds).
+MAX_IDS = 500
 
 
-def load_state(path: str) -> list[str] | None:
+def load_state(path: str) -> dict[str, list[str]]:
     p = Path(path)
     if not p.exists():
-        return None
-    return json.loads(p.read_text(encoding="utf-8")).get("seen", [])
+        return {}
+    return json.loads(p.read_text(encoding="utf-8")).get("targets", {})
 
 
-def save_state(path: str, seen_ids: list[str]) -> None:
-    capped = seen_ids[-MAX_IDS:]
+def save_state(path: str, seen_by_target: dict[str, list[str]]) -> None:
+    capped = {name: ids[-MAX_IDS:] for name, ids in seen_by_target.items()}
     Path(path).write_text(
-        json.dumps({"seen": capped}, ensure_ascii=False) + "\n", encoding="utf-8"
+        json.dumps({"targets": capped}, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
 

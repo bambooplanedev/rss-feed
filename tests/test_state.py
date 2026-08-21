@@ -11,24 +11,34 @@ def _article(id_):
     )
 
 
-def test_load_state_missing_file_returns_none(tmp_path):
-    assert load_state(str(tmp_path / "nope.json")) is None
+def test_load_state_returns_empty_dict_when_absent(tmp_path):
+    assert load_state(str(tmp_path / "nope.json")) == {}
 
 
-def test_save_then_load_round_trips(tmp_path):
-    p = str(tmp_path / "state.json")
-    save_state(p, ["a", "b", "c"])
-    assert load_state(p) == ["a", "b", "c"]
+def test_roundtrip_per_target(tmp_path):
+    path = str(tmp_path / "state.json")
+    save_state(path, {"tg": ["a", "b"], "discord": ["a"]})
+    assert load_state(path) == {"tg": ["a", "b"], "discord": ["a"]}
 
 
-def test_save_state_caps_to_most_recent(tmp_path):
-    p = str(tmp_path / "state.json")
-    ids = [str(i) for i in range(MAX_IDS + 50)]
-    save_state(p, ids)
-    loaded = load_state(p)
-    assert len(loaded) == MAX_IDS
-    assert loaded[-1] == str(MAX_IDS + 49)  # newest retained
-    assert loaded[0] == "50"                # oldest dropped
+def test_state_file_is_wrapped_in_targets_key(tmp_path):
+    import json
+    path = str(tmp_path / "state.json")
+    save_state(path, {"tg": ["a"]})
+    assert json.loads(open(path, encoding="utf-8").read()) == {"targets": {"tg": ["a"]}}
+
+
+def test_cap_applies_per_target_not_across_targets(tmp_path):
+    path = str(tmp_path / "state.json")
+    busy = [f"b{i}" for i in range(MAX_IDS + 50)]
+    quiet = ["q1", "q2"]
+
+    save_state(path, {"busy": busy, "quiet": quiet})
+    state = load_state(path)
+
+    assert len(state["busy"]) == MAX_IDS
+    assert state["busy"][0] == "b50"          # oldest dropped, newest kept
+    assert state["quiet"] == quiet            # a busy target cannot evict a quiet one
 
 
 def test_select_new_filters_seen():
