@@ -8,7 +8,8 @@ lives in `state.json`, committed back to the repo each run.
 
 Edit `feeds.yaml` — one `{ name, url, tag, tier }` entry per feed. No code change needed.
 `tier` is a required integer matching the source's tier: `1` = core news, `2` = labs/primary,
-`3` = analysis.
+`3` = analysis. **Tags must be unique** — seed state is tracked per tag, so two feeds
+sharing one would seed together and swallow each other's articles.
 
 ## Targets
 
@@ -36,16 +37,21 @@ Webhooks, Add New Webhook to Workspace, copy the URL.
 
 Three things worth knowing:
 
-- **Each target dedups independently.** A target that is absent from
-  `state.json` seeds on its first run and posts nothing, so adding a target
-  later starts it from "now" instead of dumping the backlog.
+- **Each target dedups independently, per feed.** A target seeds each feed the
+  first time that feed delivers it an article, and posts nothing for it. So
+  adding a target *or a feed* later starts it from "now" instead of dumping the
+  backlog — including when a feed was unreachable during the target's first run,
+  or when widening a target's filter brings a new feed into range.
 - **Renaming a target makes it a new target** — it re-seeds, and the old key
   stays in `state.json` as an orphan. Delete the old key by hand if it bothers you.
 - **Two targets with the same URL deliver everything twice**, and the state
   will look perfectly healthy. The dedup key is the target `name`, not the URL.
-- **The state format is one-way.** Rolling back to a single-target version of
-  this code requires deleting `state.json` first, or it will repost the entire
-  backlog.
+- **The state format is one-way, and rolling back is worse than it looks.**
+  Older code reads each entry as a flat id list; given the current
+  `{"seen": [...], "seeded_tags": [...]}` it iterates the *keys*, dedups against
+  nothing, and reposts the entire backlog until it crashes. Rolling back means
+  deleting `state.json` first (which also reposts) or converting each entry back
+  to its `seen` list by hand. The latter is the one that keeps the channel quiet.
 
 ## One-time setup
 
@@ -69,10 +75,12 @@ Runs at **07:17 and 18:17 UTC** (`.github/workflows/aggregate.yml`). Scheduled
 runs can be delayed at high load, so treat times as approximate. Use the
 **Run workflow** button (workflow_dispatch) to trigger manually.
 
-> **First run** seeds each target's currently matched feed items (capped at
-> `MAX_IDS` per target) as "already seen" and posts nothing — this avoids
-> dumping the backlog. Only items published after the first run are posted
-> thereafter.
+> **First run** seeds every feed that delivers the target an article (capped at
+> `MAX_IDS` ids per target) as "already seen" and posts nothing — this avoids
+> dumping the backlog. Seeding is per feed, not per target: a feed that was
+> unreachable that run is seeded whenever it next delivers, so an outage during
+> the first run costs nothing. Only items published after a feed is seeded are
+> posted.
 
 ## Local development
 

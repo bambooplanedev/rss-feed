@@ -11,15 +11,16 @@ from .config import load_feeds, load_targets
 from .fetch import fetch_feed
 from .models import Article, FeedSource
 from .parse import parse_feed
-from .state import MAX_IDS, load_state, save_state, select_new
+from .state import load_state, save_state, select_new
 
 log = logging.getLogger("aggregator")
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
-# Widening a filter (tiers: [1] -> [1, 2]) can make a hundred old articles
-# "new" at once. The remainder arrives on the next run 12 hours later, which
-# is the behaviour we want anyway.
+# Bounds a genuine backlog: a target that fell behind, or a feed re-seeding
+# after an outage. It is no longer what absorbs a filter edit — widening
+# `tiers` now seeds the newly matching feeds rather than delivering their
+# backlog, since you widen a filter for future news, not for stale articles.
 MAX_SENDS_PER_RUN = 20
 
 
@@ -32,6 +33,32 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> list[Arti
         except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the run
             log.warning("feed failed: %s (%s)", feed.url, exc)
     return articles
+
+
+def _migrate(state: dict, all_tags: set[str]) -> dict[str, dict]:
+    """Normalise every state entry to {"seen": [...], "seeded_tags": [...]}.
+
+    Done here rather than in load_state because this is where the feed list is
+    in scope, which means the legacy shape can be filled in directly and the
+    bad state (a null seeded_tags reaching save_state) is unrepresentable.
+
+    A bare list predates per-feed seeding. Such a target has been delivering
+    against these feeds for months, so they are seeded by definition; assuming
+    the opposite would silently swallow their next articles. Tags whose feed has
+    left feeds.yaml are pruned, or a feed removed and re-added later stays
+    latched while its ids age out of `seen` and dumps its window on return.
+    """
+    return {
+        name: (
+            {"seen": entry, "seeded_tags": sorted(all_tags)}
+            if isinstance(entry, list)
+            else {
+                "seen": entry["seen"],
+                "seeded_tags": sorted(set(entry.get("seeded_tags", ())) & all_tags),
+            }
+        )
+        for name, entry in state.items()
+    }
 
 
 def run(
@@ -52,25 +79,39 @@ def run(
     with httpx.Client() as client:
         articles = collect_articles(feeds, client)
 
-    state = load_state(state_path)
+    state = _migrate(load_state(state_path), {f.tag for f in feeds})
     failed: list[str] = list(skipped)
     sent: dict[str, int] = {}
 
     with httpx.Client() as client:
         for target in targets:
             matched = [a for a in articles if target.matches(a)]
+            entry = state.setdefault(target.name, {"seen": [], "seeded_tags": []})
 
-            if target.name not in state and not dry_run:
-                state[target.name] = [a.id for a in matched]
-                save_state(state_path, state)
+            # Per feed, not per target. A feed that was down during this target's
+            # first run is absent from `matched`, stays unseeded, and seeds when
+            # it recovers instead of dumping its window 20-per-run. Derived from
+            # `matched`, so it is filtered exactly as delivery is: a tag the
+            # target's filter excludes must not latch with zero ids recorded.
+            newly_seeded = {a.tag for a in matched} - set(entry["seeded_tags"])
+            if newly_seeded and not dry_run:
+                entry["seen"].extend(a.id for a in matched if a.tag in newly_seeded)
+                entry["seeded_tags"] = sorted(set(entry["seeded_tags"]) | newly_seeded)
                 log.info(
-                    "target %s: first run, seeded %d id(s)",
-                    target.name, len(state[target.name][-MAX_IDS:]),
+                    "target %s: seeded %d feed(s): %s",
+                    target.name, len(newly_seeded), ", ".join(sorted(newly_seeded)),
                 )
-                continue
+            elif newly_seeded:
+                log.info(
+                    "[dry-run] target %s: a real run would seed %s instead of sending",
+                    target.name, ", ".join(sorted(newly_seeded)),
+                )
 
+            # `matched` whole, not filtered by newly_seeded: the ids just seeded
+            # are already in `seen`, and leaving them in is what lets dry-run
+            # keep printing them.
             queue = sorted(
-                select_new(matched, state.get(target.name, [])),
+                select_new(matched, entry["seen"]),
                 key=lambda a: a.published or _EPOCH,
             )
             if len(queue) > MAX_SENDS_PER_RUN:
@@ -89,6 +130,19 @@ def run(
                 else:
                     try:
                         sinks.send(article, target, client)
+                    except sinks.TargetDeadError as exc:
+                        # Revoked token, kicked bot, deleted webhook. Falling
+                        # through to the transient handler below would work, but
+                        # would tell the operator it retries next run — it never
+                        # heals on its own. Nothing is recorded: the whole queue
+                        # must survive for whoever fixes the credential.
+                        log.error(
+                            "target %s: unreachable (%s); no article recorded, "
+                            "whole queue retries next run",
+                            target.name, exc,
+                        )
+                        failed.append(target.name)
+                        break
                     except sinks.PermanentSendError as exc:
                         # Recording the id is the point: leaving it in the queue
                         # would block every later article for this target forever.
@@ -97,7 +151,7 @@ def run(
                             target.name, article.url, exc,
                         )
                         failed.append(target.name)
-                        state[target.name].append(article.id)
+                        entry["seen"].append(article.id)
                     except Exception as exc:  # noqa: BLE001 - transient; retry next run
                         log.warning(
                             "target %s: transient failure on %s (%s); rest next run",
@@ -106,7 +160,7 @@ def run(
                         failed.append(target.name)
                         break
                     else:
-                        state[target.name].append(article.id)
+                        entry["seen"].append(article.id)
                         count += 1
 
                 # Loop-scoped so it paces after a permanent failure too, not

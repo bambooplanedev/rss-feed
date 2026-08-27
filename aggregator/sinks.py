@@ -110,8 +110,23 @@ MAX_RETRIES = 3
 MAX_BACKOFF = 60.0
 
 
+# Target-wide, not article-wide: 401 revoked token, 403 bot kicked or webhook
+# forbidden, 404 deleted webhook or bad bot path, 410 Slack channel archived.
+TARGET_FATAL = frozenset({401, 403, 404, 410})
+
+
 class PermanentSendError(Exception):
-    """A non-retryable 4xx. The article will never reach this target."""
+    """A non-retryable 4xx for THIS article. Later ones may still get through."""
+
+
+class TargetDeadError(Exception):
+    """The target itself is unreachable; every further article fails identically.
+
+    Deliberately NOT a subclass of PermanentSendError. main.py handles that one
+    by recording the article id and moving on, which is right for an unparseable
+    article and catastrophic for a revoked token: it marks the whole queue
+    delivered and destroys it. This one must stop the target, recording nothing.
+    """
 
 
 class TransientSendError(Exception):
@@ -156,9 +171,14 @@ def send(
         if resp.status_code == 429:
             sleep(_backoff(spec, resp))
             continue
+        if resp.status_code in TARGET_FATAL:
+            raise TargetDeadError(
+                f"target {target.name!r}: HTTP {resp.status_code} {resp.text[:200]}"
+            )
         if 400 <= resp.status_code < 500:
-            # Deleted webhook, revoked token, unparseable entities: retrying
-            # forever would block every later article for this target.
+            # Article-specific: unparseable entities, oversized payload.
+            # Deleted webhooks and revoked tokens are caught above — retrying
+            # these forever would block every later article for this target.
             raise PermanentSendError(
                 f"target {target.name!r}: HTTP {resp.status_code} {resp.text[:200]}"
             )

@@ -22,6 +22,14 @@ def load_feeds(path: str) -> list[FeedSource]:
                 f"feed #{i} in {path} is missing required field(s): {', '.join(missing)}"
             )
         feeds.append(FeedSource(name=s["name"], url=s["url"], tag=s["tag"], tier=s["tier"]))
+
+    # Per-target seed state keys on `tag`, so two feeds sharing one are
+    # indistinguishable there: seeding either marks both seeded and silently
+    # swallows the other's window.
+    tags = [f.tag for f in feeds]
+    duplicates = sorted({t for t in tags if tags.count(t) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate feed tag(s) in {path}: {', '.join(duplicates)}")
     return feeds
 
 
