@@ -19,10 +19,17 @@ feeds:
     url: https://www.wired.com/feed/tag/ai/latest/rss
     tag: wired
     tier: 1
-  - name: AI News
-    url: https://www.artificialintelligence-news.com/feed/
-    tag: ainews
-    tier: 1
+  # AI News (tag: ainews) — removed 2026-08-27. The site 403s any User-Agent
+  # starting "Mozilla/5.0 (compatible;", which is what aggregator/fetch.py sends,
+  # so this feed delivered zero articles from the first seed (2026-07-09) to its
+  # removal. Re-adding requires changing USER_AGENT first — verified working:
+  #   "AINewsAggregator/1.0 (+https://github.com/) feedparser/httpx"
+  # Re-add only AFTER a run on the per-feed-seeding code, or it is migrated as
+  # already-seeded with no recorded ids and dumps its whole window at 20/run.
+  # - name: AI News
+  #   url: https://www.artificialintelligence-news.com/feed/
+  #   tag: ainews
+  #   tier: 1
   - name: Towards Data Science
     url: https://towardsdatascience.com/feed
     tag: tds

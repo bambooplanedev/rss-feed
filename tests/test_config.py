@@ -22,7 +22,7 @@ def test_load_feeds_parses_yaml(tmp_path):
 
 def test_load_real_feeds_file_has_expected_shape():
     feeds = load_feeds("feeds.yaml")
-    assert len(feeds) >= 14
+    assert len(feeds) >= 13
     assert all(f.name and f.url and f.tag for f in feeds)
     assert all(f.tier in (1, 2, 3) for f in feeds)
 
