@@ -47,6 +47,9 @@ def clean_summary(raw: str, limit: int = SUMMARY_LIMIT) -> str:
     return truncated + "…"
 
 
+# This is the dedup key, not a cosmetic tidy-up. A publisher that changes its
+# guid format — Simon Willison's Atom feed did on 2026-08-13 — otherwise
+# reposts every article still inside its window under a second id.
 def normalize_url(url: str) -> str:
     parts = urlsplit(url.strip())
     query = [
@@ -92,7 +95,7 @@ def parse_feed(
             continue
         articles.append(
             Article(
-                id=entry.get("id") or normalize_url(url),
+                id=normalize_url(url),
                 title=(entry.get("title") or "(untitled)").strip(),
                 url=url,
                 source=source.name,

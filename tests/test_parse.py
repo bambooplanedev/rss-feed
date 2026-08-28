@@ -28,11 +28,13 @@ def test_parse_rss_returns_articles():
     assert "summary text" in a.summary
 
 
-def test_parse_atom_uses_link_href_and_id():
+def test_parse_atom_ignores_the_entry_id_in_favour_of_the_link():
+    """The feed's own <id> is deliberately not the dedup key — see
+    test_a_changed_guid_format_does_not_produce_a_duplicate."""
     articles = parse_feed((FIX / "atom_sample.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
     assert len(articles) == 1
     assert articles[0].url == "https://ex.com/atom1"
-    assert articles[0].id == "tag:ex.com,2026:atom1"
+    assert articles[0].id == "https://ex.com/atom1"
 
 
 def test_parse_malformed_feed_still_returns_entries():
@@ -104,3 +106,14 @@ def test_parse_applies_the_default_cutoff_when_none_is_given():
     """Pins that the default is actually wired up. The fixtures are dated
     2026-07-02 and only recede further past MAX_AGE_DAYS as time passes."""
     assert parse_feed((FIX / "rss_sample.xml").read_bytes(), SOURCE) == []
+
+
+def test_a_changed_guid_format_does_not_produce_a_duplicate():
+    """On 2026-08-13 Simon Willison's Atom feed switched <id> from
+    '<url>/#atom-everything' to '<url>/' and 28 articles were delivered a
+    second time. Keying on the normalized URL collapses both forms."""
+    articles = parse_feed(
+        (FIX / "guid_change_sample.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF
+    )
+    assert len(articles) == 2
+    assert {a.id for a in articles} == {"https://simonwillison.net/2026/Aug/8/auto-mode"}
