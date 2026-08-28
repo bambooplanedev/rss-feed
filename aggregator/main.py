@@ -80,7 +80,8 @@ def _migrate(state: dict, articles: list[Article], all_tags: set[str],
     by_id = {a.id: a.tag for a in articles}
     out: dict[str, dict] = {}
     for name, entry in state.items():
-        seen = entry.get("seen", {}) if isinstance(entry, dict) else entry
+        entry = entry if isinstance(entry, dict) else {"seen": entry}
+        seen = entry.get("seen", {})
         if isinstance(seen, dict):
             out[name] = {"seen": {t: ids for t, ids in seen.items() if t in all_tags}}
             continue
@@ -144,13 +145,19 @@ def run(
             # [-MAX_IDS_PER_FEED:] slice depends on. Unfiltered: buckets are per
             # feed and do not depend on which target's filter currently matches,
             # so narrowing a filter cannot freeze a bucket.
+            #
+            # Seed against anything the feed produced; prune only against a
+            # clean fetch. A bozo body is not evidence of the window, so it
+            # cannot prune — but an unseeded bozo feed that yields entries
+            # would otherwise deliver its whole window 20 per run.
+            seedable = set(ok_tags) | {a.tag for a in articles}
             offered = {
                 tag: [a.id for a in sorted((x for x in articles if x.tag == tag),
                                            key=lambda x: x.published)]
-                for tag in ok_tags
+                for tag in seedable
             }
 
-            fresh = [t for t in ok_tags if t not in buckets]
+            fresh = [t for t in seedable if t not in buckets]
             if fresh and not dry_run:
                 for tag in fresh:
                     buckets[tag] = list(offered[tag])
@@ -252,7 +259,15 @@ def run(
                         # body. Never prune a bucket to empty on that evidence.
                         continue
                     keep = set(buckets[tag])
-                    buckets[tag] = [i for i in offered[tag] if i in keep]
+                    pruned = [i for i in offered[tag] if i in keep]
+                    if buckets[tag] and not pruned:
+                        # A partial-truncation body can serve a subset disjoint
+                        # from what's recorded. That is not evidence the feed's
+                        # real window excludes the recorded ids, so a non-empty
+                        # bucket must survive even when nothing in it
+                        # intersects `offered`.
+                        continue
+                    buckets[tag] = pruned
 
             sent[target.name] = count
             if not dry_run:

@@ -214,6 +214,35 @@ def test_a_feed_offering_nothing_does_not_empty_an_existing_bucket(tmp_path, mon
     assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["old"]
 
 
+def test_a_bozo_feed_that_yields_articles_seeds_instead_of_dumping(tmp_path, monkeypatch):
+    """A bozo body is not evidence for pruning, but it is still a first
+    sighting. Refusing to seed it delivers the feed's whole window 20 per run."""
+    articles = [_article(f"a{i}", 9) for i in range(25)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch, ok=())
+    sent = []
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
+
+    m.run(**kw)
+
+    assert sent == []
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == [a.id for a in articles]
+
+
+def test_a_feed_offering_only_new_ids_does_not_empty_a_bucket_disjoint_from_them(tmp_path, monkeypatch):
+    """A partial-truncation body can serve a subset disjoint from what's
+    recorded. That's not evidence the feed's real window excludes the
+    recorded ids, so a non-empty bucket must survive even when nothing in it
+    intersects `offered`."""
+    kw = _setup(tmp_path, TWO_TARGETS, [_article("new", tier=2)], monkeypatch)
+    save_state(kw["state_path"], {"core": {"seen": {"s": ["old"]}},
+                                  "all": {"seen": {"s": ["old"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["old"]
+
+
 def test_filters_route_different_articles_to_different_targets(tmp_path, monkeypatch):
     articles = [_article("t1", tier=1), _article("t3", tier=3)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
@@ -804,14 +833,14 @@ def test_widening_a_filter_seeds_instead_of_dumping(tmp_path, monkeypatch):
 
 
 def test_legacy_list_state_migrates_and_reposts_nothing(tmp_path, monkeypatch):
+    """The bare-list shape predates `seeded_tags` entirely: no key to carry
+    forward, so every id is an unattributable orphan with nowhere to park and
+    the target migrates to an empty {"seen": {}} — every tag its articles carry
+    is then fresh and seeds from `offered` instead of reposting."""
     articles = [_article("a1", tag="alpha"), _article("b1", tag="beta")]
-    kw = _setup(tmp_path, ONE_TARGET, articles, monkeypatch, _feeds("alpha", "beta"),
-                ok=("alpha", "beta"))
+    kw = _setup(tmp_path, ONE_TARGET, articles, monkeypatch, _feeds("alpha", "beta"), ok=())
     (tmp_path / "state.json").write_text(
-        json.dumps({"targets": {
-            "core": {"seen": ["a1", "b1"], "seeded_tags": ["alpha", "beta"]},
-        }}),
-        encoding="utf-8",
+        json.dumps({"targets": {"core": ["a1", "b1"]}}), encoding="utf-8"
     )
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
@@ -825,12 +854,9 @@ def test_legacy_list_state_migrates_and_reposts_nothing(tmp_path, monkeypatch):
 
 def test_orphaned_legacy_target_key_never_serialises_as_null(tmp_path, monkeypatch):
     kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")],
-                monkeypatch, _feeds("alpha"), ok=("alpha",))
+                monkeypatch, _feeds("alpha"), ok=())
     (tmp_path / "state.json").write_text(
-        json.dumps({"targets": {
-            "core": {"seen": ["a1"], "seeded_tags": ["alpha"]},
-            "deleted-target": {"seen": ["z"], "seeded_tags": ["alpha"]},
-        }}),
+        json.dumps({"targets": {"core": ["a1"], "deleted-target": ["z"]}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
@@ -838,7 +864,7 @@ def test_orphaned_legacy_target_key_never_serialises_as_null(tmp_path, monkeypat
     m.run(**kw)
 
     orphan = load_state(kw["state_path"])["deleted-target"]
-    assert orphan["seen"] == {"alpha": []}
+    assert orphan["seen"] == {}
     assert "null" not in (tmp_path / "state.json").read_text(encoding="utf-8")
 
 
