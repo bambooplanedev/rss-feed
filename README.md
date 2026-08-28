@@ -7,9 +7,16 @@ lives in `state.json`, committed back to the repo each run.
 ## Sources
 
 Edit `feeds.yaml` — one `{ name, url, tag, tier }` entry per feed. No code change needed.
-`tier` is a required integer matching the source's tier: `1` = core news, `2` = labs/primary,
-`3` = analysis. **Tags must be unique** — seed state is tracked per tag, so two feeds
-sharing one would seed together and swallow each other's articles.
+`tier` describes what the source *is*, not how good it is: `1` = practice
+(hands-on agent/harness engineering, applied LLMs), `2` = primary (a lab or
+platform publishing its own work), `3` = research (papers, alignment, analysis).
+**Tags must be unique** — seed state is tracked per tag, so two feeds sharing one
+would seed together and swallow each other's articles.
+
+Articles published more than `parse.MAX_AGE_DAYS` (30) days ago are dropped at
+parse time and never reach a target. A feed's RSS window is not its publication
+window — some carry their entire archive — and without this bound an id evicted
+from `seen` is re-offered, looks new, and is delivered again.
 
 ## Targets
 
