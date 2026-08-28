@@ -77,15 +77,24 @@ def _published(entry) -> datetime | None:
     # RFC 822 and Atom mandates RFC 3339, so these two cover the compliant world
     # plus the common locale bug. What still fails here is hand-rolled, and
     # collect_articles escalates a feed that produces nothing but those.
-    raw = (entry.get("published") or entry.get("updated") or "").strip()
-    if not raw:
-        return None
-    for parse in (parsedate_to_datetime, datetime.fromisoformat):
-        try:
-            dt = parse(raw)
-        except (TypeError, ValueError):
+    #
+    # Tried in turn, not `or`-chained: a broken <pubDate> alongside a good
+    # <atom:updated> must not be dropped just because published was non-empty.
+    for candidate in (entry.get("published"), entry.get("updated")):
+        raw = (candidate or "").strip()
+        if not raw:
             continue
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        for parse in (parsedate_to_datetime, datetime.fromisoformat):
+            try:
+                dt = parse(raw)
+            except Exception:
+                # Deliberately broad: parsedate_to_datetime raises OverflowError
+                # (not ValueError) on an absurd year, and datetime.fromisoformat
+                # can raise other things on garbage input too. A malformed date
+                # must cost one entry, never the whole feed — collect_articles'
+                # blanket `except Exception` is what would otherwise discard it.
+                continue
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     return None
 
 
