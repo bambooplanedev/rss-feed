@@ -1,6 +1,7 @@
 import calendar
 import logging
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -65,10 +66,26 @@ def normalize_url(url: str) -> str:
 
 def _published(entry) -> datetime | None:
     st = entry.get("published_parsed") or entry.get("updated_parsed")
-    if not st:
+    if st:
+        # feedparser returns a UTC struct_time; timegm treats it as UTC.
+        return datetime.fromtimestamp(calendar.timegm(st), tz=timezone.utc)
+
+    # feedparser reports None for a date it merely could not match — a German
+    # day name, an ISO string with a space separator — which is a format change
+    # with no intent behind it, not a publisher dropping dates. RSS 2.0 mandates
+    # RFC 822 and Atom mandates RFC 3339, so these two cover the compliant world
+    # plus the common locale bug. What still fails here is hand-rolled, and
+    # collect_articles escalates a feed that produces nothing but those.
+    raw = (entry.get("published") or entry.get("updated") or "").strip()
+    if not raw:
         return None
-    # feedparser returns a UTC struct_time; timegm treats it as UTC.
-    return datetime.fromtimestamp(calendar.timegm(st), tz=timezone.utc)
+    for parse in (parsedate_to_datetime, datetime.fromisoformat):
+        try:
+            dt = parse(raw)
+        except (TypeError, ValueError):
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
 
 
 def parse_feed(

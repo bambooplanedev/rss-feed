@@ -117,3 +117,36 @@ def test_a_changed_guid_format_does_not_produce_a_duplicate():
     )
     assert len(articles) == 2
     assert {a.id for a in articles} == {"https://simonwillison.net/2026/Aug/8/auto-mode"}
+
+
+def _entry_feed(raw_date: str) -> bytes:
+    return (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>'
+        "<item><title>t</title><link>https://ex.com/a</link>"
+        f"<pubDate>{raw_date}</pubDate><description>d</description></item>"
+        "</channel></rss>"
+    ).encode()
+
+
+def test_recovers_rfc2822_with_a_non_english_day_name():
+    """feedparser's handlers key on English day names; parsedate_to_datetime
+    ignores the day name entirely. A WordPress locale change is the realistic
+    way a feed lands here."""
+    articles = parse_feed(_entry_feed("Mi, 02 Jul 2026 09:00:00 +0200"), SOURCE, cutoff=OLD_CUTOFF)
+    assert len(articles) == 1
+    assert articles[0].published == datetime(2026, 7, 2, 7, 0, tzinfo=timezone.utc)
+
+
+def test_recovers_iso_variants():
+    for raw, expected in [
+        ("2026-07-02T09:00:00Z", datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc)),
+        ("2026-07-02 09:00:00", datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc)),
+        ("2026-07-02", datetime(2026, 7, 2, 0, 0, tzinfo=timezone.utc)),
+    ]:
+        articles = parse_feed(_entry_feed(raw), SOURCE, cutoff=OLD_CUTOFF)
+        assert articles and articles[0].published == expected, raw
+
+
+def test_a_naive_recovered_date_is_treated_as_utc():
+    articles = parse_feed(_entry_feed("2026-07-02 09:00:00"), SOURCE, cutoff=OLD_CUTOFF)
+    assert articles[0].published.tzinfo is not None
