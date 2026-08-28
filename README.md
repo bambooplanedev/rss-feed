@@ -18,6 +18,12 @@ parse time and never reach a target. A feed's RSS window is not its publication
 window — some carry their entire archive — and without this bound an id evicted
 from `seen` is re-offered, looks new, and is delivered again.
 
+An entry whose date cannot be parsed at all is dropped too, since nothing can
+age-bound it. `_published` first tries feedparser, then RFC 2822, then ISO 8601,
+so a non-English day name or a space-separated timestamp is recovered rather
+than discarded. A feed that yields entries but **no** parseable dates fails the
+run: dropping its articles is right, and doing it quietly is not.
+
 ## Targets
 
 Edit `targets.yaml` — one entry per destination. Four types:

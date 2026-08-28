@@ -7,8 +7,9 @@
 # would seed together and swallow each other's articles.
 #
 # Every url below was fetched and verified on 2026-08-28: HTTP 200, non-empty,
-# and every entry carrying a publication date (parse.py keeps undated entries,
-# so a feed that stops dating them bypasses the age cutoff).
+# and every entry carrying a parseable publication date. An entry whose date
+# cannot be parsed is dropped, and a feed that yields entries but no parseable
+# dates fails the run — see parse.MAX_AGE_DAYS and collect_articles.
 feeds:
   - name: Latent Space
     url: https://www.latent.space/feed
