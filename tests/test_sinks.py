@@ -50,11 +50,6 @@ def test_payload_key_and_bold_marker_per_type(type_, key, open_b):
     assert body[key].startswith(f"🔹 {open_b}")
 
 
-def test_missing_published_renders_dash():
-    text = sinks.payload(_article(published=None), _target("slack"))["text"]
-    assert text.split("\n")[1] == "TechCrunch · —"
-
-
 def test_empty_summary_block_is_omitted():
     text = sinks.payload(_article(summary=""), _target("discord"))["content"]
     assert "\n\n\n" not in text
@@ -108,8 +103,13 @@ def test_webhook_payload_carries_every_article_field():
     }
 
 
-def test_webhook_payload_published_null_when_absent():
-    assert sinks.payload(_article(published=None), _target("webhook"))["published"] is None
+def test_published_always_renders_a_timestamp():
+    text = sinks.payload(_article(), _target("slack"))["text"]
+    assert "—" not in text
+
+
+def test_webhook_payload_published_is_always_a_string():
+    assert isinstance(sinks.payload(_article(), _target("webhook"))["published"], str)
 
 
 def test_long_title_is_truncated_but_url_and_tag_survive():
@@ -276,7 +276,7 @@ def test_exhausted_retries_raise_runtime_error():
             sinks.send(_article(), _target("discord"), client, sleep=lambda _: None)
 
 
-@pytest.mark.parametrize("status", [400, 403, 404, 422])
+@pytest.mark.parametrize("status", [400, 413, 422])
 def test_non_429_4xx_is_permanent(status):
     def handler(request):
         return httpx.Response(status, text="nope")
@@ -301,7 +301,7 @@ def test_permanent_error_message_does_not_leak_the_url():
     target = _target("discord", url="https://discord.com/api/webhooks/1/SUPERSECRET")
 
     def handler(request):
-        return httpx.Response(404, text="not found")
+        return httpx.Response(400, text="bad request")
 
     with _client(handler) as client:
         with pytest.raises(sinks.PermanentSendError) as exc:
@@ -319,5 +319,52 @@ def test_transient_error_message_does_not_leak_the_url():
     with _client(handler) as client:
         with pytest.raises(sinks.TransientSendError) as exc:
             sinks.send(_article(), target, client)
+
+    assert "SUPERSECRET" not in str(exc.value)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 410])
+def test_target_fatal_status_raises_target_dead(status):
+    def handler(request):
+        return httpx.Response(status, text="gone")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.TargetDeadError):
+            sinks.send(_article(), _target("discord"), client)
+
+
+def test_target_dead_is_not_a_permanent_send_error():
+    # main.py must NOT record the article id for these, so the two must not
+    # share a handler. Subclassing would silently reinstate the burn.
+    def handler(request):
+        return httpx.Response(401, text="unauthorized")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.TargetDeadError) as exc:
+            sinks.send(_article(), _target("telegram"), client)
+
+    assert not isinstance(exc.value, sinks.PermanentSendError)
+
+
+def test_target_dead_error_message_does_not_leak_the_url():
+    target = _target("discord", url="https://discord.com/api/webhooks/1/SUPERSECRET")
+
+    def handler(request):
+        return httpx.Response(404, text="not found")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.TargetDeadError) as exc:
+            sinks.send(_article(), target, client)
+
+    assert "SUPERSECRET" not in str(exc.value)
+
+
+def test_target_dead_error_message_does_not_leak_the_bot_token():
+    def handler(request):
+        return httpx.Response(401, text="unauthorized")
+
+    with _client(handler) as client:
+        with pytest.raises(sinks.TargetDeadError) as exc:
+            sinks.send(_article(), _target("telegram", token="SUPERSECRET"), client)
 
     assert "SUPERSECRET" not in str(exc.value)

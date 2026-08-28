@@ -19,7 +19,7 @@ class Article:
     source: str
     tag: str
     tier: int
-    published: datetime | None
+    published: datetime
     summary: str
 
 
