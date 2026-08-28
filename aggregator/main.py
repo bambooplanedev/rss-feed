@@ -15,8 +15,6 @@ from .state import load_state, save_state, select_new
 
 log = logging.getLogger("aggregator")
 
-_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
-
 # Bounds a genuine backlog: a target that fell behind, or a feed re-seeding
 # after an outage. It is no longer what absorbs a filter edit — widening
 # `tiers` now seeds the newly matching feeds rather than delivering their
@@ -128,7 +126,7 @@ def run(
             # keep printing them.
             queue = sorted(
                 select_new(matched, entry["seen"]),
-                key=lambda a: a.published or _EPOCH,
+                key=lambda a: a.published,
             )
             if len(queue) > MAX_SENDS_PER_RUN:
                 log.info(

@@ -50,11 +50,6 @@ def test_payload_key_and_bold_marker_per_type(type_, key, open_b):
     assert body[key].startswith(f"🔹 {open_b}")
 
 
-def test_missing_published_renders_dash():
-    text = sinks.payload(_article(published=None), _target("slack"))["text"]
-    assert text.split("\n")[1] == "TechCrunch · —"
-
-
 def test_empty_summary_block_is_omitted():
     text = sinks.payload(_article(summary=""), _target("discord"))["content"]
     assert "\n\n\n" not in text
@@ -108,8 +103,13 @@ def test_webhook_payload_carries_every_article_field():
     }
 
 
-def test_webhook_payload_published_null_when_absent():
-    assert sinks.payload(_article(published=None), _target("webhook"))["published"] is None
+def test_published_always_renders_a_timestamp():
+    text = sinks.payload(_article(), _target("slack"))["text"]
+    assert "—" not in text
+
+
+def test_webhook_payload_published_is_always_a_string():
+    assert isinstance(sinks.payload(_article(), _target("webhook"))["published"], str)
 
 
 def test_long_title_is_truncated_but_url_and_tag_survive():

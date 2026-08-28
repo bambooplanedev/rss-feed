@@ -53,11 +53,7 @@ def _text(article: Article, target: Target) -> str:
     esc = spec.esc_text or (lambda s: s)
     esc_url = spec.esc_url or (lambda s: s)
     open_b, close_b = spec.bold
-    when = (
-        article.published.astimezone(target.tz).strftime("%H:%M, %d %b")
-        if article.published
-        else "—"
-    )
+    when = article.published.astimezone(target.tz).strftime("%H:%M, %d %b")
 
     def build(title: str, summary: str) -> str:
         parts = [f"🔹 {open_b}{esc(title)}{close_b}", f"{esc(article.source)} · {when}"]
@@ -89,7 +85,7 @@ def payload(article: Article, target: Target) -> dict:
     if target.type == "webhook":
         return {
             **asdict(article),
-            "published": article.published.isoformat() if article.published else None,
+            "published": article.published.isoformat(),
         }
     text = _text(article, target)
     if target.type == "telegram":
