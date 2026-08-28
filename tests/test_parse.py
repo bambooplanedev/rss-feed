@@ -192,3 +192,16 @@ def test_an_absurd_year_drops_only_that_entry_not_the_feed():
     )
     assert result.articles == []
     assert result.undated == 1
+
+
+def test_parse_reports_bozo_for_a_malformed_document():
+    """`bozo` is how collect_articles tells a Cloudflare interstitial from a
+    quiet feed — both yield few or no articles without raising."""
+    result = parse_feed((FIX / "malformed_dated.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
+    assert result.bozo is True
+    assert result.articles                      # still tolerant: entries survive
+
+
+def test_parse_reports_not_bozo_for_a_clean_document():
+    result = parse_feed((FIX / "rss_sample.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
+    assert result.bozo is False

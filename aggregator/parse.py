@@ -100,8 +100,14 @@ def _published(entry) -> datetime | None:
 
 class ParseResult(NamedTuple):
     articles: list[Article]
-    undated: int   # entries dropped because no date could be recovered
-    dated: int = 0  # entries that yielded a usable date, before the cutoff is applied
+    undated: int    # entries dropped because no date could be recovered
+    dated: int      # entries that yielded a usable date, before the cutoff
+    bozo: bool      # feedparser could not parse the document cleanly
+
+    # No defaults, deliberately. `dated` carrying one was flagged as a latent
+    # trap: a two-argument construction silently yields dated == 0, and since
+    # collect_articles escalates on `undated and not dated`, that reintroduces
+    # the false positive on a quiet feed that this field exists to prevent.
 
 
 def parse_feed(
@@ -142,4 +148,4 @@ def parse_feed(
                 summary=clean_summary(entry.get("summary", "")),
             )
         )
-    return ParseResult(articles, undated, dated)
+    return ParseResult(articles, undated, dated, bool(parsed.bozo))

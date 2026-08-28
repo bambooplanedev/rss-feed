@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 import time
+from typing import NamedTuple
 
 import httpx
 
@@ -32,15 +33,21 @@ MAX_SENDS_PER_RUN = 20
 PERMANENT_FAILURE_STREAK = 3
 
 
-def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> tuple[list[Article], list[str]]:
-    """Returns the articles and the tags of feeds that failed this run.
+class CollectResult(NamedTuple):
+    articles: list[Article]
+    failed: list[str]   # tags that make the run exit non-zero
+    ok: list[str]       # tags safe to seed against and prune against
 
-    A feed that returned entries but no datable ones counts as failed. Dropping
-    those entries is right, but it is invisible: `failed` is what turns it into
-    a non-zero exit instead of a warning nobody reads.
-    """
+    # `failed` and `ok` are not complements. A bozo feed is in neither: it
+    # parsed something, so it is not worth a red run, but the body may be a
+    # truncated page or an interstitial, so its window is not evidence of what
+    # the feed holds and nothing may be pruned against it.
+
+
+def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> CollectResult:
     articles: list[Article] = []
     failed: list[str] = []
+    ok: list[str] = []
     for feed in feeds:
         try:
             content = fetch_feed(feed.url, client)
@@ -55,8 +62,10 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> tuple[lis
                 "can reach a target", feed.url, result.undated,
             )
             failed.append(feed.tag)
+        elif not result.bozo:
+            ok.append(feed.tag)
         articles.extend(result.articles)
-    return articles, failed
+    return CollectResult(articles, failed, ok)
 
 
 def _migrate(state: dict, all_tags: set[str]) -> dict[str, dict]:
@@ -101,7 +110,8 @@ def run(
     feeds = load_feeds(feeds_path)
 
     with httpx.Client() as client:
-        articles, feed_failures = collect_articles(feeds, client)
+        collected = collect_articles(feeds, client)
+    articles, feed_failures, ok_tags = collected
 
     state = _migrate(load_state(state_path), {f.tag for f in feeds})
     failed: list[str] = list(skipped) + feed_failures
