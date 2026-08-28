@@ -3,35 +3,24 @@ from pathlib import Path
 
 from .models import Article
 
-# Per target, not per file: a shared cap would let a busy target evict a quiet
-# target's ids and cause silent reposts. The cap must exceed what the feed list
-# can put in the age window with headroom: parse.MAX_AGE_DAYS caps what any one
-# feed contributes to `seen` at 30 days of its own publication rate, not its
-# whole archive, so the bound is per-feed-per-day, not per-feed-total. A cap
-# below that window discards ids still inside it, so select_new finds "new"
-# articles that were really already published, and a channel reposts its
-# backlog indefinitely.
+# Per feed, not per target. Pruning is the real bound — after each run a bucket
+# holds only what its feed still offers, which is the RSS window, tens of ids.
+# This cap is the backstop for a feed that offers more than that in one run.
 #
-# Sized at 5 articles/feed/day, uniform across the list, with headroom for the
-# feed list to roughly double before anyone needs to revisit this. 5/day is
-# already a safety margin above the measured worst case (simonw at 3.7/day; the
-# list averages 0.6/day). Past the cutoff, `seen` grows with what's delivered,
-# not with what's added — a feed added today only ever seeds its own window, so
-# headroom is consumed by accumulation over time, not by the act of adding a
-# feed. test_state.py pins both the window and the headroom to feeds.yaml so the
-# cap fails loudly when the feed list outgrows it, rather than after the
-# reposts land.
+# 5 articles/feed/day against parse.MAX_AGE_DAYS is 150; times a 3x rate
+# headroom is 450. The measured worst case in the current list is simonw at
+# 3.7/day and the list averages 0.6/day.
 #
-# This is a ceiling, not an allocation — `seen` is 153 ids today. Reaching it is
-# not free: state.json is committed twice a day, so a `seen` near this cap is a
-# large single-line blob per run. Fix that before growing the feed list far.
-MAX_IDS = 5000
+# It must exceed what a feed can OFFER, not what it can publish in the window.
+# Those coincide only while the age bound has no holes: a feed whose entries
+# stop being datable is dropped entirely rather than admitted undated, which is
+# what keeps the two equal.
+MAX_IDS_PER_FEED = 500
 
 
-def load_state(path: str) -> dict[str, list[str] | dict]:
-    """Returns entries verbatim: {"seen": [...], "seeded_tags": [...]} for
-    current files, a bare id list for pre-per-feed-seeding ones. main.run
-    migrates the legacy shape, where the feed list is in scope."""
+def load_state(path: str) -> dict[str, dict]:
+    """Returns entries verbatim: {"seen": {tag: [ids]}}. main._migrate converts
+    older shapes, where the feed list and this run's articles are in scope."""
     p = Path(path)
     if not p.exists():
         return {}
@@ -39,13 +28,19 @@ def load_state(path: str) -> dict[str, list[str] | dict]:
 
 
 def save_state(path: str, state: dict[str, dict]) -> None:
-    # Dedupe before capping, not after: renaming a feed's tag re-seeds it and
-    # re-appends ids already in `seen`. Deduping after the slice would let those
-    # duplicates push live ids out of the window first.
+    # Dedupe before capping, not after: a re-seed re-appends ids already in the
+    # bucket, and deduping after the slice would let those duplicates push live
+    # ids out of the window first.
+    #
+    # The slice keeps the tail, which is the newest ONLY because run builds every
+    # bucket in publication order ascending. Do not try to sort here — this
+    # function receives ids and has never seen an Article.
     out = {
         name: {
-            "seen": list(dict.fromkeys(entry["seen"]))[-MAX_IDS:],
-            "seeded_tags": entry["seeded_tags"],
+            "seen": {
+                tag: list(dict.fromkeys(ids))[-MAX_IDS_PER_FEED:]
+                for tag, ids in entry["seen"].items()
+            }
         }
         for name, entry in state.items()
     }
@@ -54,6 +49,11 @@ def save_state(path: str, state: dict[str, dict]) -> None:
     )
 
 
-def select_new(articles: list[Article], seen_ids: list[str]) -> list[Article]:
-    seen = set(seen_ids)
-    return [a for a in articles if a.id not in seen]
+def select_new(articles: list[Article], seen: dict[str, list[str]]) -> list[Article]:
+    """Membership against the union of every bucket, so a syndicated article is
+    delivered once rather than once per feed carrying it. Delivery writes the id
+    to its own article's bucket; pruning still works, because an id recorded
+    under one tag that another feed also offers is retained through that feed's
+    own `offered` set."""
+    everything = {i for ids in seen.values() for i in ids}
+    return [a for a in articles if a.id not in everything]
