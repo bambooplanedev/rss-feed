@@ -32,6 +32,15 @@ MAX_SENDS_PER_RUN = 20
 # different things.
 PERMANENT_FAILURE_STREAK = 3
 
+# The only sensor on state.MAX_IDS_PER_FEED's real invariant: that cap must
+# exceed what a feed can OFFER in one run, not what it publishes in the
+# window, because pruning turns an overflow from a one-off into a permanent
+# repost loop — the evicted ids keep being offered every run after. This
+# threshold is comfortably below MAX_IDS_PER_FEED (500) so an operator sees
+# the warning while a feed is still merely trending toward the cap, not only
+# once it has already blown past it.
+OFFER_WARN_THRESHOLD = 200
+
 
 class CollectResult(NamedTuple):
     articles: list[Article]
@@ -64,6 +73,13 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> CollectRe
             failed.append(feed.tag)
         elif not result.bozo:
             ok.append(feed.tag)
+        if len(result.articles) > OFFER_WARN_THRESHOLD:
+            log.warning(
+                "feed %s offered %d articles this run, above the %d early-warning "
+                "threshold; approaching MAX_IDS_PER_FEED risks a permanent repost "
+                "loop once pruning starts evicting ids the feed still offers",
+                feed.tag, len(result.articles), OFFER_WARN_THRESHOLD,
+            )
         articles.extend(result.articles)
     return CollectResult(articles, failed, ok)
 
@@ -158,15 +174,19 @@ def run(
             }
 
             fresh = [t for t in seedable if t not in buckets]
-            if fresh and not dry_run:
+            if fresh:
+                # Seed in dry-run too. Nothing is persisted — save_state is
+                # skipped below — and seeding in memory is what makes the
+                # preview mirror a real run. Without it select_new runs against
+                # unseeded buckets and the preview reports the
+                # MAX_SENDS_PER_RUN ceiling instead of the handful that would
+                # actually go out, which makes the dry-run gate useless.
                 for tag in fresh:
                     buckets[tag] = list(offered[tag])
-                log.info("target %s: seeded %d feed(s): %s",
-                         target.name, len(fresh), ", ".join(sorted(fresh)))
-            elif fresh:
                 log.info(
-                    "[dry-run] target %s: a real run would seed %s instead of sending",
-                    target.name, ", ".join(sorted(fresh)),
+                    "%starget %s: seeded %d feed(s): %s",
+                    "[dry-run] " if dry_run else "",
+                    target.name, len(fresh), ", ".join(sorted(fresh)),
                 )
 
             queue = sorted(select_new(matched, buckets), key=lambda a: a.published)

@@ -529,7 +529,10 @@ def test_state_is_saved_after_each_target(tmp_path, monkeypatch):
 
 
 def test_dry_run_prints_with_target_prefix_and_persists_nothing(tmp_path, monkeypatch, capsys):
+    # Already-seeded state, so this article is genuinely new post-seed rather
+    # than being absorbed by dry-run's own in-memory seeding.
     kw = _setup(tmp_path, TWO_TARGETS, [_article("a")], monkeypatch)
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def explode(*a, **k):
         raise AssertionError("dry-run must not send")
@@ -540,8 +543,29 @@ def test_dry_run_prints_with_target_prefix_and_persists_nothing(tmp_path, monkey
 
     out = capsys.readouterr().out
     assert "[core]" in out and "[all]" in out
-    import os
-    assert not os.path.exists(kw["state_path"])
+    assert load_state(kw["state_path"]) == _buckets("core", "all")  # untouched
+
+
+def test_dry_run_seeds_unseeded_feeds_so_the_preview_matches_a_real_run(tmp_path, monkeypatch):
+    """A fresh feed must be seeded in memory during a dry run, not left
+    unseeded. Otherwise select_new runs against an unseeded bucket and the
+    preview reports the MAX_SENDS_PER_RUN ceiling (20) instead of what a real
+    run would actually send (1 here: the lone new article from the
+    already-seeded feed; the 25 from the fresh feed get seeded, not queued)."""
+    articles = ([_article("s-new", tag="s")]
+                + [_article(f"n{i}", tag="new") for i in range(25)])
+    targets_yaml = "targets:\n  - name: t\n    type: discord\n    url: https://ex.com/t\n"
+    kw = _setup(tmp_path, targets_yaml, articles, monkeypatch,
+                feeds_yaml=_feeds("s", "new"), ok=("s", "new"))
+    save_state(kw["state_path"], {"t": {"seen": {"s": ["old"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    dry_sent, dry_failed = m.run(**kw, dry_run=True)
+    real_sent, real_failed = m.run(**kw, dry_run=False)
+
+    assert dry_sent["t"] == 1
+    assert dry_sent == real_sent
+    assert dry_failed == real_failed == []
 
 
 def test_dry_run_validates_the_config(tmp_path, monkeypatch):
@@ -562,6 +586,40 @@ def test_a_feed_with_entries_but_no_dated_ones_fails_the_run(monkeypatch):
 
     assert articles == []
     assert "undated" in failed
+
+
+def test_a_feed_offering_more_than_the_warn_threshold_logs_a_warning(monkeypatch, caplog):
+    """The only sensor on MAX_IDS_PER_FEED's real invariant: it must exceed
+    what a feed can OFFER, not what it publishes in the window, because
+    pruning turns an overflow into a permanent repost loop."""
+    articles = [_article(f"a{i}") for i in range(m.OFFER_WARN_THRESHOLD + 1)]
+    feeds = [FeedSource(name="busy", url="https://ex.com/f", tag="busy", tier=1)]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(m, "parse_feed",
+                        lambda content, source: m.ParseResult(articles, undated=0,
+                                                               dated=len(articles), bozo=False))
+
+    with caplog.at_level("WARNING", logger="aggregator"):
+        m.collect_articles(feeds, client=None)
+
+    [record] = [r for r in caplog.records if "busy" in r.message]
+    assert str(m.OFFER_WARN_THRESHOLD + 1) in record.message
+
+
+def test_a_feed_at_or_below_the_warn_threshold_does_not_warn(monkeypatch, caplog):
+    articles = [_article(f"a{i}") for i in range(m.OFFER_WARN_THRESHOLD)]
+    feeds = [FeedSource(name="quiet", url="https://ex.com/f", tag="quiet", tier=1)]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(m, "parse_feed",
+                        lambda content, source: m.ParseResult(articles, undated=0,
+                                                               dated=len(articles), bozo=False))
+
+    with caplog.at_level("WARNING", logger="aggregator"):
+        m.collect_articles(feeds, client=None)
+
+    assert caplog.records == []
 
 
 def test_a_feed_with_no_entries_at_all_does_not_fail_the_run(monkeypatch):
