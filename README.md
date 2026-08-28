@@ -51,10 +51,12 @@ Webhooks, Add New Webhook to Workspace, copy the URL.
 A few things worth knowing:
 
 - **Each target keeps a bucket per feed** (`{"seen": {tag: [ids]}}`), not one
-  flat list. A feed's bucket is seeded the first time that feed yields any
-  article for the target on a run — clean or not, so an unseeded feed with a
-  malformed body can't dump its whole window either — and posts nothing that
-  run. From then on, every *clean* fetch prunes the bucket down to just what
+  flat list. A feed's bucket is seeded the first time that feed either fetches
+  cleanly — even if it publishes nothing that run — or yields any article at
+  all, even from a malformed body, whichever happens first; either way it
+  posts nothing that run. A clean fetch that publishes nothing still seeds
+  with an empty bucket, so the feed's next article isn't swallowed as if it
+  were backlog. From then on, every *clean* fetch prunes the bucket down to just what
   the feed's RSS window currently offers, with one guard: pruning never
   empties a bucket that already has contents. Offering nothing at all this
   run, or offering nothing that overlaps what's recorded, both read as a
@@ -117,12 +119,14 @@ Runs at **07:17 and 18:17 UTC** (`.github/workflows/aggregate.yml`). Scheduled
 runs can be delayed at high load, so treat times as approximate. Use the
 **Run workflow** button (workflow_dispatch) to trigger manually.
 
-> **First run** seeds every feed that yields an article that run as "already
-> seen" (capped at `MAX_IDS_PER_FEED` ids per feed) and posts nothing — this
-> avoids dumping the backlog. Seeding is per feed, not per target: a feed that
-> was unreachable, or failed to parse, that run isn't seeded — it seeds
-> whenever it next produces an article, so an outage during the first run
-> costs nothing. Only items published after a feed is seeded are posted.
+> **First run** seeds every feed that either fetches cleanly (even if it
+> publishes nothing) or yields any article, whichever happens first, as
+> "already seen" (capped at `MAX_IDS_PER_FEED` ids per feed) and posts
+> nothing — this avoids dumping the backlog. Seeding is per feed, not per
+> target: a feed that fails outright, or parses but yields no usable dates,
+> that run isn't seeded — it seeds on its next clean fetch or next article
+> produced, so an outage during the first run costs nothing. Only items
+> published after a feed is seeded are posted.
 
 ## Local development
 

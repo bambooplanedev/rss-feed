@@ -151,27 +151,28 @@ def run(
     failed: list[str] = list(skipped) + feed_failures
     sent: dict[str, int] = {}
 
+    # Publication order ascending, which is the invariant save_state's
+    # [-MAX_IDS_PER_FEED:] slice depends on. Unfiltered: buckets are per
+    # feed and do not depend on which target's filter currently matches,
+    # so narrowing a filter cannot freeze a bucket. Computed once, outside
+    # the per-target loop below, since neither depends on the target.
+    #
+    # Seed against anything the feed produced; prune only against a
+    # clean fetch. A bozo body is not evidence of the window, so it
+    # cannot prune — but an unseeded bozo feed that yields entries
+    # would otherwise deliver its whole window 20 per run.
+    seedable = set(ok_tags) | {a.tag for a in articles}
+    offered = {
+        tag: [a.id for a in sorted((x for x in articles if x.tag == tag),
+                                   key=lambda x: x.published)]
+        for tag in seedable
+    }
+
     with httpx.Client() as client:
         for target in targets:
             matched = [a for a in articles if target.matches(a)]
             entry = state.setdefault(target.name, {"seen": {}})
             buckets = entry["seen"]
-
-            # Publication order ascending, which is the invariant save_state's
-            # [-MAX_IDS_PER_FEED:] slice depends on. Unfiltered: buckets are per
-            # feed and do not depend on which target's filter currently matches,
-            # so narrowing a filter cannot freeze a bucket.
-            #
-            # Seed against anything the feed produced; prune only against a
-            # clean fetch. A bozo body is not evidence of the window, so it
-            # cannot prune — but an unseeded bozo feed that yields entries
-            # would otherwise deliver its whole window 20 per run.
-            seedable = set(ok_tags) | {a.tag for a in articles}
-            offered = {
-                tag: [a.id for a in sorted((x for x in articles if x.tag == tag),
-                                           key=lambda x: x.published)]
-                for tag in seedable
-            }
 
             fresh = [t for t in seedable if t not in buckets]
             if fresh:
@@ -256,8 +257,8 @@ def run(
                     else:
                         # Pending first, then this id: `seen` then follows the
                         # order articles were attempted, which is what
-                        # save_state's [-MAX_IDS:] assumes when it keeps "the
-                        # newest".
+                        # save_state's [-MAX_IDS_PER_FEED:] assumes when it
+                        # keeps "the newest".
                         for tag, i_ in pending:
                             buckets.setdefault(tag, []).append(i_)
                         pending.clear()

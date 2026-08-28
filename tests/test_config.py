@@ -185,8 +185,9 @@ def test_filters_default_to_empty_and_become_tuples(tmp_path):
 
 
 def test_load_feeds_rejects_duplicate_tags(tmp_path):
-    """seeded_tags keys on `tag`, so two feeds sharing one are indistinguishable:
-    seeding either would mark both seeded and swallow the other's window."""
+    """`seen` buckets key on `tag`, so two feeds sharing one would share a
+    bucket: seeding or pruning either feed would seed or prune both, and each
+    feed's articles would swallow or evict the other's."""
     path = tmp_path / "feeds.yaml"
     path.write_text(
         "feeds:\n"

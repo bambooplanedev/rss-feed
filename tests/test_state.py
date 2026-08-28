@@ -75,5 +75,9 @@ def test_max_ids_per_feed_clears_the_largest_bucket_committed():
                if isinstance(entry.get("seen"), dict)]
     if not buckets:
         pytest.skip("state.json is not migrated to per-feed buckets yet")
-    largest = max(len(ids) for seen in buckets for ids in seen.values())
+    # default=0: an orphan target key serialises as {"seen": {}} (see
+    # test_orphaned_legacy_target_key_never_serialises_as_null in
+    # test_main.py), which is a reachable state and would otherwise make
+    # max() raise ValueError instead of failing the assertion.
+    largest = max((len(ids) for seen in buckets for ids in seen.values()), default=0)
     assert MAX_IDS_PER_FEED > largest

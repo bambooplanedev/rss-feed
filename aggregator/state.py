@@ -52,8 +52,11 @@ def save_state(path: str, state: dict[str, dict]) -> None:
 def select_new(articles: list[Article], seen: dict[str, list[str]]) -> list[Article]:
     """Membership against the union of every bucket, so a syndicated article is
     delivered once rather than once per feed carrying it. Delivery writes the id
-    to its own article's bucket; pruning still works, because an id recorded
-    under one tag that another feed also offers is retained through that feed's
-    own `offered` set."""
+    to its own article's bucket. Pruning, though, is strictly per tag (main.run
+    prunes only `offered[tag]` against `buckets[tag]`): an id is retained only
+    while *its own* feed still offers it. An id recorded under tag A that rotates
+    out of feed A's window is dropped even while feed B still offers the same
+    article — a syndicated article can then be redelivered under feed B. Latent
+    today because no two feeds in feeds.yaml carry the same URL."""
     everything = {i for ids in seen.values() for i in ids}
     return [a for a in articles if a.id not in everything]
