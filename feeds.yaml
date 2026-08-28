@@ -3,8 +3,8 @@
 #   2 = primary       a lab or platform publishing its own work
 #   3 = research      papers, alignment, and analysis of them
 #
-# Tags must be unique — seed state is tracked per tag, so two feeds sharing one
-# would seed together and swallow each other's articles.
+# Tags must be unique — state.json keeps one seen-id bucket per tag, so two
+# feeds sharing a tag would share a bucket and swallow each other's articles.
 #
 # Every url below was fetched and verified on 2026-08-28: HTTP 200, non-empty,
 # and every entry carrying a parseable publication date. An entry whose date

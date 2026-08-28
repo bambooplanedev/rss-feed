@@ -48,23 +48,52 @@ Webhooks, Add New Webhook to Workspace, copy the URL.
 > Keep them in GitHub Secrets and reference them as `${VAR}` — never commit the
 > literal URL.
 
-Three things worth knowing:
+A few things worth knowing:
 
-- **Each target dedups independently, per feed.** A target seeds each feed the
-  first time that feed delivers it an article, and posts nothing for it. So
-  adding a target *or a feed* later starts it from "now" instead of dumping the
-  backlog — including when a feed was unreachable during the target's first run,
-  or when widening a target's filter brings a new feed into range.
+- **Each target keeps a bucket per feed** (`{"seen": {tag: [ids]}}`), not one
+  flat list. A feed's bucket is seeded the first time that feed yields any
+  article for the target on a run — clean or not, so an unseeded feed with a
+  malformed body can't dump its whole window either — and posts nothing that
+  run. From then on, every *clean* fetch prunes the bucket down to just what
+  the feed's RSS window currently offers, with one guard: pruning never
+  empties a bucket that already has contents. Offering nothing at all this
+  run, or offering nothing that overlaps what's recorded, both read as a
+  truncated body rather than a genuinely emptied window, so the bucket is
+  left as it was until a clean fetch proves otherwise. A feed that fails
+  outright, or parses but yields no usable dates, is left alone entirely —
+  its bucket, if it has one, is neither seeded nor pruned; and a bozo feed
+  that does parse dated articles is seeded but never pruned, since a bozo
+  body isn't trusted as evidence of the feed's real window. So adding a
+  target *or a feed* later starts it from "now" instead of dumping the
+  backlog, including when a feed was unreachable during the target's first
+  run, or when widening a target's filter brings a new feed into range.
 - **Renaming a target makes it a new target** — it re-seeds, and the old key
   stays in `state.json` as an orphan. Delete the old key by hand if it bothers you.
 - **Two targets with the same URL deliver everything twice**, and the state
   will look perfectly healthy. The dedup key is the target `name`, not the URL.
 - **The state format is one-way, and rolling back is worse than it looks.**
-  Older code reads each entry as a flat id list; given the current
-  `{"seen": [...], "seeded_tags": [...]}` it iterates the *keys*, dedups against
-  nothing, and reposts the entire backlog until it crashes. Rolling back means
-  deleting `state.json` first (which also reposts) or converting each entry back
-  to its `seen` list by hand. The latter is the one that keeps the channel quiet.
+  Older code reads each entry's `seen` as a flat id list; given the current
+  `{"seen": {tag: [ids]}}` it iterates the *tags* as if they were ids, dedups
+  against nothing, and reposts the entire backlog until it crashes. Rolling
+  back means deleting `state.json` first (which also reposts) or converting
+  each entry's buckets back into one flat `seen` list by hand. The latter is
+  the one that keeps the channel quiet.
+- **A dead target stops delivering for the whole run, not article by
+  article — and it can look two different ways.** Four HTTP statuses are
+  unambiguous: 401 revoked token, 403 bot kicked or webhook forbidden, 404
+  deleted webhook or bad bot path, 410 Slack channel archived. Any one of
+  these (`TARGET_FATAL`) stops the queue immediately, with nothing from that
+  point recorded as seen — the whole remaining queue retries next run once
+  the credential or webhook is fixed. The ambiguous case is different: a
+  Telegram `chat not found` also reports as plain HTTP 400, the same code
+  used for one malformed article, so the status alone can't tell a dead
+  target from a bad article. That's what the buffering and
+  `PERMANENT_FAILURE_STREAK` are for — three consecutive per-article
+  failures with no successful delivery between them are read as the target
+  being unreachable too, and the run gives up on it and stops recording;
+  anything already delivered earlier in the run stays recorded regardless.
+  Either way the run exits non-zero, so a dead target shows up as a failed
+  workflow run instead of a quietly empty one.
 
 ## One-time setup
 
@@ -88,12 +117,12 @@ Runs at **07:17 and 18:17 UTC** (`.github/workflows/aggregate.yml`). Scheduled
 runs can be delayed at high load, so treat times as approximate. Use the
 **Run workflow** button (workflow_dispatch) to trigger manually.
 
-> **First run** seeds every feed that delivers the target an article (capped at
-> `MAX_IDS` ids per target) as "already seen" and posts nothing — this avoids
-> dumping the backlog. Seeding is per feed, not per target: a feed that was
-> unreachable that run is seeded whenever it next delivers, so an outage during
-> the first run costs nothing. Only items published after a feed is seeded are
-> posted.
+> **First run** seeds every feed that yields an article that run as "already
+> seen" (capped at `MAX_IDS_PER_FEED` ids per feed) and posts nothing — this
+> avoids dumping the backlog. Seeding is per feed, not per target: a feed that
+> was unreachable, or failed to parse, that run isn't seeded — it seeds
+> whenever it next produces an article, so an outage during the first run
+> costs nothing. Only items published after a feed is seeded are posted.
 
 ## Local development
 

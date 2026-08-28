@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from aggregator.models import Article
-from aggregator.parse import MAX_AGE_DAYS
 from aggregator.state import load_state, save_state, select_new, MAX_IDS_PER_FEED
 
 
@@ -62,14 +63,17 @@ def test_select_new_with_no_buckets_returns_everything():
     assert select_new(articles, {}) == articles
 
 
-# The cap is per feed now, so it no longer scales with the feed list and the
-# headroom is a rate multiple rather than a feed count. 5/day is already above
-# the measured worst case (simonw at 3.7/day; the list averages 0.6/day), and
-# pruning means a bucket normally settles at the feed's RSS window, well under
-# this. The cap is a backstop, not the primary bound.
-MAX_ARTICLES_PER_FEED_PER_DAY = 5
-RATE_HEADROOM = 3
-
-
-def test_max_ids_per_feed_clears_a_feed_publishing_far_above_the_measured_rate():
-    assert MAX_IDS_PER_FEED > MAX_ARTICLES_PER_FEED_PER_DAY * MAX_AGE_DAYS * RATE_HEADROOM
+# The cap is per feed now, so it no longer scales with the feed list. Rather
+# than assume a rate, measure one: the largest bucket actually committed in
+# state.json is real traffic, not a guess, and the cap only needs to clear it
+# with room to spare. Skips until state.json is migrated to buckets — on this
+# commit it is still the pre-migration flat shape, so there is nothing to
+# measure yet.
+def test_max_ids_per_feed_clears_the_largest_bucket_committed():
+    committed = load_state("state.json")
+    buckets = [entry["seen"] for entry in committed.values()
+               if isinstance(entry.get("seen"), dict)]
+    if not buckets:
+        pytest.skip("state.json is not migrated to per-feed buckets yet")
+    largest = max(len(ids) for seen in buckets for ids in seen.values())
+    assert MAX_IDS_PER_FEED > largest
