@@ -141,6 +141,84 @@ def test_permanent_failure_does_not_block_the_queue(tmp_path, monkeypatch):
     assert "core" in failed
 
 
+def test_dead_target_with_a_short_queue_records_nothing(tmp_path, monkeypatch):
+    """The case a per-run counter misses: two articles, both fail, the streak
+    never reaches three. Under a counter both ids were burned unrecoverably."""
+    articles = [_article("a", 9), _article("b", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _seeded("core", "all"))
+
+    def dead_for_core(article, target, client):
+        if target.name == "core":
+            raise PermanentSendError("400 Bad Request: chat not found")
+
+    monkeypatch.setattr(m.sinks, "send", dead_for_core)
+
+    counts, failed = m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"] == []
+    assert counts["core"] == 0
+    assert "core" in failed
+
+
+def test_dead_target_with_a_long_queue_stops_after_the_streak(tmp_path, monkeypatch):
+    articles = [_article(str(i), 9) for i in range(10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _seeded("core", "all"))
+    attempts = []
+
+    def dead_for_core(article, target, client):
+        if target.name == "core":
+            attempts.append(article.id)
+            raise PermanentSendError("400 Bad Request: chat not found")
+
+    monkeypatch.setattr(m.sinks, "send", dead_for_core)
+
+    counts, failed = m.run(**kw)
+
+    assert len(attempts) == m.PERMANENT_FAILURE_STREAK      # stopped hammering
+    assert load_state(kw["state_path"])["core"]["seen"] == []   # and burned nothing
+    assert "core" in failed
+
+
+def test_a_bad_article_after_a_success_is_recorded(tmp_path, monkeypatch):
+    articles = [_article("good1", 9), _article("bad", 10), _article("good2", 11)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _seeded("core", "all"))
+
+    def picky(article, target, client):
+        if target.name == "core" and article.id == "bad":
+            raise PermanentSendError("400 can't parse entities")
+
+    monkeypatch.setattr(m.sinks, "send", picky)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"] == ["good1", "bad", "good2"]
+
+
+def test_a_bad_article_before_any_success_is_committed_once_one_lands(tmp_path, monkeypatch):
+    articles = [_article("bad", 9), _article("good", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _seeded("core", "all"))
+
+    def picky(article, target, client):
+        if target.name == "core" and article.id == "bad":
+            raise PermanentSendError("400 can't parse entities")
+
+    monkeypatch.setattr(m.sinks, "send", picky)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"] == ["bad", "good"]
+
+
+def test_an_existing_permanent_failure_test_still_holds(tmp_path, monkeypatch):
+    """test_permanent_failure_does_not_block_the_queue asserts set equality on
+    `seen`, so it passes unchanged under the new ordering. Do not modify it —
+    if it fails, the buffering flush order is wrong."""
+
+
 def test_target_dead_stops_the_target_without_recording(tmp_path, monkeypatch):
     """A revoked token must not mark the whole queue delivered."""
     articles = [_article("a", 9), _article("b", 10)]

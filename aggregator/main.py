@@ -2,7 +2,6 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime, timezone
 
 import httpx
 
@@ -20,6 +19,17 @@ log = logging.getLogger("aggregator")
 # `tiers` now seeds the newly matching feeds rather than delivering their
 # backlog, since you widen a filter for future news, not for stale articles.
 MAX_SENDS_PER_RUN = 20
+
+# Telegram answers `chat not found` with HTTP 400, the same code it uses for a
+# malformed message, so the status alone cannot tell a dead target from one bad
+# article. What separates them is shape: a bad article is sporadic, a dead
+# target fails universally. Three failures with no delivery in between ends the
+# target's queue for this run — a stop-hammering rule, not the correctness
+# mechanism. The buffering below is the correctness mechanism.
+#
+# Equal to sinks.MAX_RETRIES by coincidence. Do not unify them; they count
+# different things.
+PERMANENT_FAILURE_STREAK = 3
 
 
 def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> tuple[list[Article], list[str]]:
@@ -136,6 +146,9 @@ def run(
                 queue = queue[:MAX_SENDS_PER_RUN]
 
             count = 0
+            delivered = False
+            pending: list[str] = []
+            streak = 0
             for i, article in enumerate(queue):
                 if dry_run:
                     print(f"[{target.name}] {sinks.preview(article, target)}")
@@ -158,14 +171,28 @@ def run(
                         failed.append(target.name)
                         break
                     except sinks.PermanentSendError as exc:
-                        # Recording the id is the point: leaving it in the queue
-                        # would block every later article for this target forever.
+                        # Recorded only once this target has proved it can
+                        # deliver. Until then the id stays pending: a rotated
+                        # credential fails every article, and recording those
+                        # destroys the queue an article at a time.
                         log.error(
-                            "target %s: permanent failure on %s (%s); skipping article",
+                            "target %s: permanent failure on %s (%s); %s",
                             target.name, article.url, exc,
+                            "skipping article" if delivered else "holding pending a delivery",
                         )
                         failed.append(target.name)
-                        entry["seen"].append(article.id)
+                        streak += 1
+                        if delivered:
+                            entry["seen"].append(article.id)
+                        else:
+                            pending.append(article.id)
+                        if streak >= PERMANENT_FAILURE_STREAK:
+                            log.error(
+                                "target %s: %d permanent failures with nothing delivered; "
+                                "treating as unreachable, whole queue retries next run",
+                                target.name, streak,
+                            )
+                            break
                     except Exception as exc:  # noqa: BLE001 - transient; retry next run
                         log.warning(
                             "target %s: transient failure on %s (%s); rest next run",
@@ -174,7 +201,15 @@ def run(
                         failed.append(target.name)
                         break
                     else:
+                        # Pending first, then this id: `seen` then follows the
+                        # order articles were attempted, which is what
+                        # save_state's [-MAX_IDS:] assumes when it keeps "the
+                        # newest".
+                        entry["seen"].extend(pending)
+                        pending.clear()
                         entry["seen"].append(article.id)
+                        delivered = True
+                        streak = 0
                         count += 1
 
                 # Loop-scoped so it paces after a permanent failure too, not
