@@ -68,30 +68,47 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> CollectRe
     return CollectResult(articles, failed, ok)
 
 
-def _migrate(state: dict, all_tags: set[str]) -> dict[str, dict]:
-    """Normalise every state entry to {"seen": [...], "seeded_tags": [...]}.
+def _migrate(state: dict, articles: list[Article], all_tags: set[str],
+             ok_tags: set[str]) -> dict[str, dict]:
+    """Normalise every entry to {"seen": {tag: [ids]}}.
 
-    Done here rather than in load_state because this is where the feed list is
-    in scope, which means the legacy shape can be filled in directly and the
-    bad state (a null seeded_tags reaching save_state) is unrepresentable.
-
-    A bare list predates per-feed seeding. Such a target has been delivering
-    against these feeds for months, so they are seeded by definition; assuming
-    the opposite would silently swallow their next articles. Tags whose feed has
-    left feeds.yaml are pruned, or a feed removed and re-added later stays
-    latched while its ids age out of `seen` and dumps its window on return.
+    Done here rather than in load_state because this is where both the feed list
+    and this run's articles are in scope — which is what makes the conversion
+    guess-free. Each article carries its tag, so a flat id can be filed by
+    matching it against what the feeds actually offered.
     """
-    return {
-        name: (
-            {"seen": entry, "seeded_tags": sorted(all_tags)}
-            if isinstance(entry, list)
-            else {
-                "seen": entry["seen"],
-                "seeded_tags": sorted(set(entry.get("seeded_tags", ())) & all_tags),
-            }
-        )
-        for name, entry in state.items()
-    }
+    by_id = {a.id: a.tag for a in articles}
+    out: dict[str, dict] = {}
+    for name, entry in state.items():
+        seen = entry.get("seen", {}) if isinstance(entry, dict) else entry
+        if isinstance(seen, dict):
+            out[name] = {"seen": {t: ids for t, ids in seen.items() if t in all_tags}}
+            continue
+
+        # `seeded_tags` is exactly the seeded/unseeded predicate. A tag absent
+        # from it gets NO key, so it seeds on its next clean fetch and sends
+        # nothing. Giving it an empty bucket would mean "seeded, remembers
+        # nothing", and its whole window would be new.
+        seeded = set(entry.get("seeded_tags", ())) & all_tags
+        buckets: dict[str, list[str]] = {t: [] for t in seeded}
+        orphans: list[str] = []
+        for i in seen:
+            tag = by_id.get(i)
+            if tag in buckets:
+                buckets[tag].append(i)
+            else:
+                orphans.append(i)
+
+        # An id we cannot attribute belongs to a removed feed, to an article
+        # that has aged out, or to a seeded feed that did not fetch cleanly this
+        # run. Only the last matters: dropping it would make that feed's window
+        # look new. Every orphan was already delivered, so an over-inclusive
+        # bucket can only suppress something already sent, and that feed's next
+        # clean fetch prunes it back.
+        for tag in seeded - ok_tags:
+            buckets[tag].extend(orphans)
+        out[name] = {"seen": buckets}
+    return out
 
 
 def run(
@@ -113,41 +130,39 @@ def run(
         collected = collect_articles(feeds, client)
     articles, feed_failures, ok_tags = collected
 
-    state = _migrate(load_state(state_path), {f.tag for f in feeds})
+    state = _migrate(load_state(state_path), articles, {f.tag for f in feeds}, set(ok_tags))
     failed: list[str] = list(skipped) + feed_failures
     sent: dict[str, int] = {}
 
     with httpx.Client() as client:
         for target in targets:
             matched = [a for a in articles if target.matches(a)]
-            entry = state.setdefault(target.name, {"seen": [], "seeded_tags": []})
+            entry = state.setdefault(target.name, {"seen": {}})
+            buckets = entry["seen"]
 
-            # Per feed, not per target. A feed that was down during this target's
-            # first run is absent from `matched`, stays unseeded, and seeds when
-            # it recovers instead of dumping its window 20-per-run. Derived from
-            # `matched`, so it is filtered exactly as delivery is: a tag the
-            # target's filter excludes must not latch with zero ids recorded.
-            newly_seeded = {a.tag for a in matched} - set(entry["seeded_tags"])
-            if newly_seeded and not dry_run:
-                entry["seen"].extend(a.id for a in matched if a.tag in newly_seeded)
-                entry["seeded_tags"] = sorted(set(entry["seeded_tags"]) | newly_seeded)
-                log.info(
-                    "target %s: seeded %d feed(s): %s",
-                    target.name, len(newly_seeded), ", ".join(sorted(newly_seeded)),
-                )
-            elif newly_seeded:
+            # Publication order ascending, which is the invariant save_state's
+            # [-MAX_IDS_PER_FEED:] slice depends on. Unfiltered: buckets are per
+            # feed and do not depend on which target's filter currently matches,
+            # so narrowing a filter cannot freeze a bucket.
+            offered = {
+                tag: [a.id for a in sorted((x for x in articles if x.tag == tag),
+                                           key=lambda x: x.published)]
+                for tag in ok_tags
+            }
+
+            fresh = [t for t in ok_tags if t not in buckets]
+            if fresh and not dry_run:
+                for tag in fresh:
+                    buckets[tag] = list(offered[tag])
+                log.info("target %s: seeded %d feed(s): %s",
+                         target.name, len(fresh), ", ".join(sorted(fresh)))
+            elif fresh:
                 log.info(
                     "[dry-run] target %s: a real run would seed %s instead of sending",
-                    target.name, ", ".join(sorted(newly_seeded)),
+                    target.name, ", ".join(sorted(fresh)),
                 )
 
-            # `matched` whole, not filtered by newly_seeded: the ids just seeded
-            # are already in `seen`, and leaving them in is what lets dry-run
-            # keep printing them.
-            queue = sorted(
-                select_new(matched, entry["seen"]),
-                key=lambda a: a.published,
-            )
+            queue = sorted(select_new(matched, buckets), key=lambda a: a.published)
             if len(queue) > MAX_SENDS_PER_RUN:
                 log.info(
                     "target %s: %d queued, sending %d, rest next run",
@@ -157,7 +172,7 @@ def run(
 
             count = 0
             delivered = False
-            pending: list[str] = []
+            pending: list[tuple[str, str]] = []
             streak = 0
             for i, article in enumerate(queue):
                 if dry_run:
@@ -193,9 +208,9 @@ def run(
                         failed.append(target.name)
                         streak += 1
                         if delivered:
-                            entry["seen"].append(article.id)
+                            buckets.setdefault(article.tag, []).append(article.id)
                         else:
-                            pending.append(article.id)
+                            pending.append((article.tag, article.id))
                         if streak >= PERMANENT_FAILURE_STREAK:
                             log.error(
                                 "target %s: %d consecutive permanent failures; treating as "
@@ -216,9 +231,10 @@ def run(
                         # order articles were attempted, which is what
                         # save_state's [-MAX_IDS:] assumes when it keeps "the
                         # newest".
-                        entry["seen"].extend(pending)
+                        for tag, i_ in pending:
+                            buckets.setdefault(tag, []).append(i_)
                         pending.clear()
-                        entry["seen"].append(article.id)
+                        buckets.setdefault(article.tag, []).append(article.id)
                         delivered = True
                         streak = 0
                         count += 1
@@ -228,6 +244,15 @@ def run(
                 # transient failure already `break`s out before this runs.
                 if not dry_run and i < len(queue) - 1:
                     sleep(sinks.SPECS[target.type].delay)
+
+            if not dry_run:
+                for tag in ok_tags:
+                    if tag not in buckets or not offered[tag]:
+                        # Nothing offered is indistinguishable from a truncated
+                        # body. Never prune a bucket to empty on that evidence.
+                        continue
+                    keep = set(buckets[tag])
+                    buckets[tag] = [i for i in offered[tag] if i in keep]
 
             sent[target.name] = count
             if not dry_run:

@@ -27,10 +27,11 @@ def _feeds(*tags):
     )
 
 
-def _setup(tmp_path, targets_yaml, articles, monkeypatch, feeds_yaml=FEEDS):
+def _setup(tmp_path, targets_yaml, articles, monkeypatch, feeds_yaml=FEEDS, ok=("s",)):
     (tmp_path / "feeds.yaml").write_text(feeds_yaml, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(targets_yaml, encoding="utf-8")
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: (articles, [], []))
+    monkeypatch.setattr(m, "collect_articles",
+                        lambda feeds, client: m.CollectResult(articles, [], list(ok)))
     return dict(
         feeds_path=str(tmp_path / "feeds.yaml"),
         targets_path=str(tmp_path / "targets.yaml"),
@@ -39,9 +40,10 @@ def _setup(tmp_path, targets_yaml, articles, monkeypatch, feeds_yaml=FEEDS):
     )
 
 
-def _seeded(*names, tags=("s",)):
-    """Targets already past the seed, so a test can exercise delivery."""
-    return {n: {"seen": [], "seeded_tags": list(tags)} for n in names}
+def _buckets(*names, tags=("s",)):
+    """Targets already past the seed, so a test can exercise delivery.
+    Replaces _seeded, which returned the old two-field shape."""
+    return {n: {"seen": {t: [] for t in tags}} for n in names}
 
 
 TWO_TARGETS = (
@@ -49,6 +51,50 @@ TWO_TARGETS = (
     "  - name: core\n    type: discord\n    url: https://ex.com/core\n    tiers: [1]\n"
     "  - name: all\n    type: slack\n    url: https://ex.com/all\n"
 )
+
+
+def test_migrate_carries_seeded_tags_forward_as_buckets(tmp_path):
+    """The thirteen unseeded feeds must stay unseeded. Giving a tag an empty
+    bucket means 'seeded, remembers nothing', which makes its whole window new."""
+    articles = [_article("s1", tag="s"), _article("n1", tag="new")]
+    state = {"tg": {"seen": ["s1", "gone"], "seeded_tags": ["s"]}}
+
+    out = m._migrate(state, articles, {"s", "new"}, {"s", "new"})
+
+    assert out["tg"]["seen"] == {"s": ["s1"]}      # 'new' gets NO key
+    assert "new" not in out["tg"]["seen"]
+
+
+def test_migrate_drops_ids_it_cannot_attribute_when_every_feed_fetched(tmp_path):
+    articles = [_article("s1", tag="s")]
+    state = {"tg": {"seen": ["s1", "aged-out"], "seeded_tags": ["s"]}}
+
+    out = m._migrate(state, articles, {"s"}, {"s"})
+
+    assert out["tg"]["seen"]["s"] == ["s1"]
+
+
+def test_migrate_parks_unattributable_ids_with_a_seeded_feed_that_did_not_fetch():
+    """Dropping them would make that feed's window look new. Every one was
+    already delivered, so an over-inclusive bucket can only suppress something
+    already sent — and the feed's next clean fetch prunes it back."""
+    articles = [_article("s1", tag="s")]
+    state = {"tg": {"seen": ["s1", "down1"], "seeded_tags": ["s", "down"]}}
+
+    out = m._migrate(state, articles, {"s", "down"}, {"s"})     # 'down' not ok
+
+    assert "down1" in out["tg"]["seen"]["down"]
+
+
+def test_migrate_drops_a_bucket_whose_feed_left_feeds_yaml():
+    state = {"tg": {"seen": {"s": ["1"], "gone": ["2"]}}}
+    out = m._migrate(state, [], {"s"}, {"s"})
+    assert "gone" not in out["tg"]["seen"]
+
+
+def test_migrate_leaves_an_already_migrated_entry_alone():
+    state = {"tg": {"seen": {"s": ["1"]}}}
+    assert m._migrate(state, [], {"s"}, {"s"})["tg"]["seen"] == {"s": ["1"]}
 
 
 def test_new_target_is_seeded_and_sends_nothing(tmp_path, monkeypatch):
@@ -61,13 +107,117 @@ def test_new_target_is_seeded_and_sends_nothing(tmp_path, monkeypatch):
     assert sent == []
     assert counts == {"core": 0, "all": 0}   # ran and delivered nothing, not absent
     assert failed == []
-    assert set(load_state(kw["state_path"])["core"]["seen"]) == {"a", "b"}
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["a", "b"]
+
+
+def test_a_feed_seen_for_the_first_time_is_recorded_and_sends_nothing(tmp_path, monkeypatch):
+    articles = [_article("a"), _article("b")]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    sent = []
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
+
+    counts, failed = m.run(**kw)
+
+    assert sent == []
+    assert counts["core"] == 0
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["a", "b"]
+
+
+def test_a_feed_that_fetched_cleanly_and_published_nothing_gets_an_empty_bucket(tmp_path, monkeypatch):
+    """The eugeneyan case. Seeding on clean fetch rather than first delivery is
+    what stops its next article being swallowed."""
+    kw = _setup(tmp_path, TWO_TARGETS, [], monkeypatch)
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"] == {"s": []}
+
+
+def test_an_id_the_feed_no_longer_offers_is_pruned(tmp_path, monkeypatch):
+    kw = _setup(tmp_path, TWO_TARGETS, [_article("new")], monkeypatch)
+    save_state(kw["state_path"], {"core": {"seen": {"s": ["old", "new"]}},
+                                  "all": {"seen": {"s": ["old", "new"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["new"]
+
+
+def test_an_id_the_feed_still_offers_survives_delivery(tmp_path, monkeypatch):
+    articles = [_article("keep", 9), _article("fresh", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], {"core": {"seen": {"s": ["keep"]}},
+                                  "all": {"seen": {"s": ["keep"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["keep", "fresh"]
+
+
+def test_an_article_capped_out_of_this_run_does_not_enter_the_bucket(tmp_path, monkeypatch):
+    """The test the spec's first revision could not have failed: 25 queued, 20
+    sent, and the 5 unsent must still be new next run."""
+    articles = [_article(f"a{i}", 9) for i in range(25)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _buckets("core", "all"))
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    bucket = load_state(kw["state_path"])["core"]["seen"]["s"]
+    assert len(bucket) == m.MAX_SENDS_PER_RUN
+    assert "a24" not in bucket
+
+
+def test_a_target_dead_mid_queue_leaves_the_bucket_untouched(tmp_path, monkeypatch):
+    articles = [_article("a", 9), _article("b", 10)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _buckets("core", "all"))
+
+    def dead_for_core(article, target, client):
+        if target.name == "core":
+            raise TargetDeadError("target 'core': HTTP 401 unauthorized")
+
+    monkeypatch.setattr(m.sinks, "send", dead_for_core)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == []
+
+
+def test_a_feed_that_did_not_fetch_cleanly_is_neither_seeded_nor_pruned(tmp_path, monkeypatch):
+    """A bozo parse or a failed fetch gives no information about what the feed
+    holds, so its bucket must survive the run unchanged."""
+    kw = _setup(tmp_path, TWO_TARGETS, [], monkeypatch, ok=())
+    save_state(kw["state_path"], {"core": {"seen": {"s": ["old"]}},
+                                  "all": {"seen": {"s": ["old"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["old"]
+
+
+def test_a_feed_offering_nothing_does_not_empty_an_existing_bucket(tmp_path, monkeypatch):
+    """Zero offered is indistinguishable from a truncated body. Emptying the
+    bucket on that evidence makes the feed's whole window new on recovery."""
+    kw = _setup(tmp_path, TWO_TARGETS, [], monkeypatch)
+    save_state(kw["state_path"], {"core": {"seen": {"s": ["old"]}},
+                                  "all": {"seen": {"s": ["old"]}}})
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    m.run(**kw)
+
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["old"]
 
 
 def test_filters_route_different_articles_to_different_targets(tmp_path, monkeypatch):
     articles = [_article("t1", tier=1), _article("t3", tier=3)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
@@ -88,7 +238,7 @@ def test_articles_are_fetched_once_for_all_targets(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "collect_articles", counting_collect)
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
     state_path = str(tmp_path / "state.json")
-    save_state(state_path, _seeded("core", "all"))
+    save_state(state_path, _buckets("core", "all"))
 
     m.run(feeds_path=str(tmp_path / "feeds.yaml"),
           targets_path=str(tmp_path / "targets.yaml"),
@@ -100,7 +250,7 @@ def test_articles_are_fetched_once_for_all_targets(tmp_path, monkeypatch):
 def test_transient_failure_stops_one_target_and_spares_the_others(tmp_path, monkeypatch):
     articles = [_article("a", 9), _article("b", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     sent = []
 
     def flaky(article, target, client):
@@ -113,19 +263,19 @@ def test_transient_failure_stops_one_target_and_spares_the_others(tmp_path, monk
     counts, failed = m.run(**kw)
 
     state = load_state(kw["state_path"])
-    assert state["core"]["seen"] == []             # nothing recorded: retry next run
-    assert set(state["all"]["seen"]) == {"a", "b"}  # the other target is unaffected
+    assert state["core"]["seen"]["s"] == []          # nothing recorded: retry next run
+    assert state["all"]["seen"]["s"] == ["a", "b"]   # the other target is unaffected
     assert counts["all"] == 2
     assert "core" in failed
 
 
-# Asserts set equality on `seen`, so it passes unchanged under the buffering
-# flush order added below. If it starts failing, the flush order is wrong.
+# Asserts exact order on `seen`, so it pins the buffering flush order: pending
+# ids flush before the id that just delivered.
 def test_permanent_failure_does_not_block_the_queue(tmp_path, monkeypatch):
     """A deleted webhook must not poison every later article for that target."""
     articles = [_article("bad", 9), _article("good", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     sent = []
 
     def picky(article, target, client):
@@ -138,7 +288,7 @@ def test_permanent_failure_does_not_block_the_queue(tmp_path, monkeypatch):
     counts, failed = m.run(**kw)
 
     assert ("core", "good") in sent                # the queue kept moving
-    assert set(load_state(kw["state_path"])["core"]["seen"]) == {"bad", "good"}
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["bad", "good"]
     assert counts["core"] == 1                     # 'bad' is recorded but not counted as sent
     assert "core" in failed
 
@@ -148,7 +298,7 @@ def test_dead_target_with_a_short_queue_records_nothing(tmp_path, monkeypatch):
     never reaches three. Under a counter both ids were burned unrecoverably."""
     articles = [_article("a", 9), _article("b", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def dead_for_core(article, target, client):
         if target.name == "core":
@@ -158,7 +308,7 @@ def test_dead_target_with_a_short_queue_records_nothing(tmp_path, monkeypatch):
 
     counts, failed = m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seen"] == []
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == []
     assert counts["core"] == 0
     assert "core" in failed
 
@@ -166,7 +316,7 @@ def test_dead_target_with_a_short_queue_records_nothing(tmp_path, monkeypatch):
 def test_dead_target_with_a_long_queue_stops_after_the_streak(tmp_path, monkeypatch):
     articles = [_article(str(i), 9) for i in range(10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     attempts = []
 
     def dead_for_core(article, target, client):
@@ -179,14 +329,14 @@ def test_dead_target_with_a_long_queue_stops_after_the_streak(tmp_path, monkeypa
     counts, failed = m.run(**kw)
 
     assert len(attempts) == m.PERMANENT_FAILURE_STREAK      # stopped hammering
-    assert load_state(kw["state_path"])["core"]["seen"] == []   # and burned nothing
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == []   # and burned nothing
     assert "core" in failed
 
 
 def test_a_bad_article_after_a_success_is_recorded(tmp_path, monkeypatch):
     articles = [_article("good1", 9), _article("bad", 10), _article("good2", 11)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def picky(article, target, client):
         if target.name == "core" and article.id == "bad":
@@ -196,13 +346,13 @@ def test_a_bad_article_after_a_success_is_recorded(tmp_path, monkeypatch):
 
     m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seen"] == ["good1", "bad", "good2"]
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["good1", "bad", "good2"]
 
 
 def test_a_bad_article_before_any_success_is_committed_once_one_lands(tmp_path, monkeypatch):
     articles = [_article("bad", 9), _article("good", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def picky(article, target, client):
         if target.name == "core" and article.id == "bad":
@@ -212,7 +362,7 @@ def test_a_bad_article_before_any_success_is_committed_once_one_lands(tmp_path, 
 
     m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seen"] == ["bad", "good"]
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["bad", "good"]
 
 
 def test_streak_log_after_a_delivery_does_not_claim_nothing_was_sent(tmp_path, monkeypatch, caplog):
@@ -222,7 +372,7 @@ def test_streak_log_after_a_delivery_does_not_claim_nothing_was_sent(tmp_path, m
     when the delivered id is already recorded."""
     articles = [_article(str(i), 9) for i in range(5)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def deliver_one_then_die(article, target, client):
         if target.name == "core" and article.id != "0":
@@ -244,7 +394,7 @@ def test_target_dead_stops_the_target_without_recording(tmp_path, monkeypatch):
     """A revoked token must not mark the whole queue delivered."""
     articles = [_article("a", 9), _article("b", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     sent = []
 
     def dead_for_core(article, target, client):
@@ -256,7 +406,7 @@ def test_target_dead_stops_the_target_without_recording(tmp_path, monkeypatch):
 
     counts, failed = m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seen"] == []   # nothing burned
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == []   # nothing burned
     assert counts["core"] == 0
     assert "core" in failed
     assert sorted(a for t, a in sent if t == "all") == ["a", "b"]  # other target unharmed
@@ -266,7 +416,7 @@ def test_target_dead_is_retried_in_full_next_run(tmp_path, monkeypatch):
     """The whole queue must survive, not just the article that hit the 401."""
     articles = [_article("a", 9), _article("b", 10)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     monkeypatch.setattr(
         m.sinks, "send",
@@ -285,7 +435,7 @@ def test_target_dead_is_logged_as_unreachable_not_as_transient(tmp_path, monkeyp
     """A revoked token never heals on its own; telling the operator it retries
     next run buys a week of silent non-delivery."""
     kw = _setup(tmp_path, TWO_TARGETS, [_article("a")], monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     monkeypatch.setattr(
         m.sinks, "send",
         lambda a, t, c: (_ for _ in ()).throw(TargetDeadError("target 'core': HTTP 401 nope")),
@@ -303,14 +453,14 @@ def test_target_dead_is_logged_as_unreachable_not_as_transient(tmp_path, monkeyp
 def test_send_cap_leaves_the_remainder_for_the_next_run(tmp_path, monkeypatch):
     articles = [_article(f"a{i}", hour=9) for i in range(m.MAX_SENDS_PER_RUN + 5)]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
     counts, _ = m.run(**kw)
 
     assert counts["core"] == m.MAX_SENDS_PER_RUN
-    assert len(load_state(kw["state_path"])["core"]["seen"]) == m.MAX_SENDS_PER_RUN
+    assert len(load_state(kw["state_path"])["core"]["seen"]["s"]) == m.MAX_SENDS_PER_RUN
 
 
 def test_unset_env_in_one_target_does_not_reduce_the_others(tmp_path, monkeypatch):
@@ -321,7 +471,7 @@ def test_unset_env_in_one_target_does_not_reduce_the_others(tmp_path, monkeypatc
         "  - name: alive\n    type: slack\n    url: https://ex.com/alive\n"
     )
     kw = _setup(tmp_path, targets, [_article("a"), _article("b")], monkeypatch)
-    save_state(kw["state_path"], _seeded("alive"))
+    save_state(kw["state_path"], _buckets("alive"))
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
@@ -335,7 +485,7 @@ def test_state_is_saved_after_each_target(tmp_path, monkeypatch):
     """Process death mid-run must not cost the targets that already finished."""
     articles = [_article("a")]
     kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
-    save_state(kw["state_path"], _seeded("core", "all"))
+    save_state(kw["state_path"], _buckets("core", "all"))
 
     def send_then_die(article, target, client):
         if target.name == "all":
@@ -346,7 +496,7 @@ def test_state_is_saved_after_each_target(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seen"] == ["a"]
+    assert load_state(kw["state_path"])["core"]["seen"]["s"] == ["a"]
 
 
 def test_dry_run_prints_with_target_prefix_and_persists_nothing(tmp_path, monkeypatch, capsys):
@@ -581,52 +731,65 @@ def test_feed_that_yielded_nothing_is_seeded_on_a_later_run(tmp_path, monkeypatc
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
 
-    kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")], monkeypatch, feeds)
+    kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")], monkeypatch, feeds,
+                ok=("alpha",))
     m.run(**kw)                                    # beta is down: yields nothing
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha"]
+    assert load_state(kw["state_path"])["core"]["seen"] == {"alpha": ["a1"]}
 
     both = [_article("a1", tag="alpha"), _article("b1", tag="beta"),
             _article("b2", tag="beta")]
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: (both, [], []))
+    monkeypatch.setattr(m, "collect_articles",
+                        lambda feeds, client: m.CollectResult(both, [], ["alpha", "beta"]))
     m.run(**kw)                                    # beta recovers
 
     assert sent == []                              # seeded, not dumped
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha", "beta"]
+    assert load_state(kw["state_path"])["core"]["seen"] == {
+        "alpha": ["a1"], "beta": ["b1", "b2"],
+    }
 
 
 def test_feed_added_later_seeds_silently(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
     kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")],
-                monkeypatch, _feeds("alpha"))
+                monkeypatch, _feeds("alpha"), ok=("alpha",))
     m.run(**kw)
 
     (tmp_path / "feeds.yaml").write_text(_feeds("alpha", "beta"), encoding="utf-8")
     monkeypatch.setattr(
         m, "collect_articles",
-        lambda feeds, client: ([_article("a1", tag="alpha"), _article("b1", tag="beta")], [], []),
+        lambda feeds, client: m.CollectResult(
+            [_article("a1", tag="alpha"), _article("b1", tag="beta")], [], ["alpha", "beta"]),
     )
     m.run(**kw)
 
     assert sent == []
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha", "beta"]
+    assert load_state(kw["state_path"])["core"]["seen"] == {"alpha": ["a1"], "beta": ["b1"]}
 
 
-def test_filtered_out_feed_does_not_latch_its_tag(tmp_path, monkeypatch):
-    """Regression: seeding keyed on global feed health latched a filtered-out
-    tag with zero recorded ids, and could never re-seed it."""
-    articles = [_article("a1", tier=1, tag="alpha"), _article("b1", tier=2, tag="beta")]
-    kw = _setup(tmp_path, TIER1_ONLY, articles, monkeypatch, _feeds("alpha", "beta"))
-    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+def test_narrowing_then_widening_a_filter_delivers_nothing(tmp_path, monkeypatch):
+    """Replaces test_filtered_out_feed_does_not_latch_its_tag. Buckets ignore
+    the target's filter, so an excluded tag is still seeded and pruned and
+    widening later finds nothing new. The old bug was latching with ZERO ids
+    recorded; buckets are built from `offered`, not from `matched`."""
+    articles = [_article("t2", 9, tier=2, tag="two")]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch,
+                feeds_yaml=_feeds("s", "two"), ok=("s", "two"))
+    sent = []
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append((t.name, a.id)))
 
     m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha"]
+    # core filters tiers [1], so it never sends the tier-2 article — but its
+    # bucket holds it anyway, which is what makes widening later safe.
+    assert load_state(kw["state_path"])["core"]["seen"]["two"] == ["t2"]
+    assert ("core", "t2") not in sent
 
 
 def test_widening_a_filter_seeds_instead_of_dumping(tmp_path, monkeypatch):
     articles = [_article("a1", tier=1, tag="alpha"), _article("b1", tier=2, tag="beta")]
-    kw = _setup(tmp_path, TIER1_ONLY, articles, monkeypatch, _feeds("alpha", "beta"))
+    kw = _setup(tmp_path, TIER1_ONLY, articles, monkeypatch, _feeds("alpha", "beta"),
+                ok=("alpha", "beta"))
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
     m.run(**kw)
@@ -637,14 +800,18 @@ def test_widening_a_filter_seeds_instead_of_dumping(tmp_path, monkeypatch):
     m.run(**kw)
 
     assert sent == []
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha", "beta"]
+    assert load_state(kw["state_path"])["core"]["seen"] == {"alpha": ["a1"], "beta": ["b1"]}
 
 
 def test_legacy_list_state_migrates_and_reposts_nothing(tmp_path, monkeypatch):
     articles = [_article("a1", tag="alpha"), _article("b1", tag="beta")]
-    kw = _setup(tmp_path, ONE_TARGET, articles, monkeypatch, _feeds("alpha", "beta"))
+    kw = _setup(tmp_path, ONE_TARGET, articles, monkeypatch, _feeds("alpha", "beta"),
+                ok=("alpha", "beta"))
     (tmp_path / "state.json").write_text(
-        json.dumps({"targets": {"core": ["a1", "b1"]}}), encoding="utf-8"
+        json.dumps({"targets": {
+            "core": {"seen": ["a1", "b1"], "seeded_tags": ["alpha", "beta"]},
+        }}),
+        encoding="utf-8",
     )
     sent = []
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: sent.append(a.id))
@@ -653,15 +820,17 @@ def test_legacy_list_state_migrates_and_reposts_nothing(tmp_path, monkeypatch):
 
     assert sent == []
     entry = load_state(kw["state_path"])["core"]
-    assert entry["seen"] == ["a1", "b1"]
-    assert entry["seeded_tags"] == ["alpha", "beta"]
+    assert entry["seen"] == {"alpha": ["a1"], "beta": ["b1"]}
 
 
 def test_orphaned_legacy_target_key_never_serialises_as_null(tmp_path, monkeypatch):
     kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")],
-                monkeypatch, _feeds("alpha"))
+                monkeypatch, _feeds("alpha"), ok=("alpha",))
     (tmp_path / "state.json").write_text(
-        json.dumps({"targets": {"core": ["a1"], "deleted-target": ["z"]}}),
+        json.dumps({"targets": {
+            "core": {"seen": ["a1"], "seeded_tags": ["alpha"]},
+            "deleted-target": {"seen": ["z"], "seeded_tags": ["alpha"]},
+        }}),
         encoding="utf-8",
     )
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
@@ -669,7 +838,7 @@ def test_orphaned_legacy_target_key_never_serialises_as_null(tmp_path, monkeypat
     m.run(**kw)
 
     orphan = load_state(kw["state_path"])["deleted-target"]
-    assert orphan["seeded_tags"] == ["alpha"]
+    assert orphan["seen"] == {"alpha": []}
     assert "null" not in (tmp_path / "state.json").read_text(encoding="utf-8")
 
 
@@ -677,10 +846,15 @@ def test_seeded_tags_are_pruned_when_a_feed_leaves_feeds_yaml(tmp_path, monkeypa
     """Unpruned, a removed-then-re-added feed stays latched while its ids age out
     of `seen` under the cap, and dumps its window on return."""
     kw = _setup(tmp_path, ONE_TARGET, [_article("a1", tag="alpha")],
-                monkeypatch, _feeds("alpha"))
-    save_state(kw["state_path"], {"core": {"seen": ["a1"], "seeded_tags": ["alpha", "gone"]}})
+                monkeypatch, _feeds("alpha"), ok=("alpha",))
+    (tmp_path / "state.json").write_text(
+        json.dumps({"targets": {
+            "core": {"seen": ["a1"], "seeded_tags": ["alpha", "gone"]},
+        }}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
 
     m.run(**kw)
 
-    assert load_state(kw["state_path"])["core"]["seeded_tags"] == ["alpha"]
+    assert "gone" not in load_state(kw["state_path"])["core"]["seen"]
