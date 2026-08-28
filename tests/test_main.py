@@ -119,6 +119,8 @@ def test_transient_failure_stops_one_target_and_spares_the_others(tmp_path, monk
     assert "core" in failed
 
 
+# Asserts set equality on `seen`, so it passes unchanged under the buffering
+# flush order added below. If it starts failing, the flush order is wrong.
 def test_permanent_failure_does_not_block_the_queue(tmp_path, monkeypatch):
     """A deleted webhook must not poison every later article for that target."""
     articles = [_article("bad", 9), _article("good", 10)]
@@ -213,10 +215,29 @@ def test_a_bad_article_before_any_success_is_committed_once_one_lands(tmp_path, 
     assert load_state(kw["state_path"])["core"]["seen"] == ["bad", "good"]
 
 
-def test_an_existing_permanent_failure_test_still_holds(tmp_path, monkeypatch):
-    """test_permanent_failure_does_not_block_the_queue asserts set equality on
-    `seen`, so it passes unchanged under the new ordering. Do not modify it —
-    if it fails, the buffering flush order is wrong."""
+def test_streak_log_after_a_delivery_does_not_claim_nothing_was_sent(tmp_path, monkeypatch, caplog):
+    """`streak` counts consecutive failures since the last success, not since
+    the run started. A target that delivers once and then dies must not log
+    a message claiming nothing was delivered, or that the whole queue retries
+    when the delivered id is already recorded."""
+    articles = [_article(str(i), 9) for i in range(5)]
+    kw = _setup(tmp_path, TWO_TARGETS, articles, monkeypatch)
+    save_state(kw["state_path"], _seeded("core", "all"))
+
+    def deliver_one_then_die(article, target, client):
+        if target.name == "core" and article.id != "0":
+            raise PermanentSendError("400 Bad Request: chat not found")
+
+    monkeypatch.setattr(m.sinks, "send", deliver_one_then_die)
+
+    with caplog.at_level("ERROR", logger="aggregator"):
+        m.run(**kw)
+
+    unreachable = [r for r in caplog.records if "treating as unreachable" in r.getMessage()]
+    assert unreachable, "operator is never told the target was cut off"
+    message = unreachable[0].getMessage()
+    assert "nothing delivered" not in message
+    assert "whole queue" not in message
 
 
 def test_target_dead_stops_the_target_without_recording(tmp_path, monkeypatch):

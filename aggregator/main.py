@@ -188,9 +188,10 @@ def run(
                             pending.append(article.id)
                         if streak >= PERMANENT_FAILURE_STREAK:
                             log.error(
-                                "target %s: %d permanent failures with nothing delivered; "
-                                "treating as unreachable, whole queue retries next run",
+                                "target %s: %d consecutive permanent failures; treating as "
+                                "unreachable, %s retries next run",
                                 target.name, streak,
+                                "the rest of the queue" if delivered else "the whole queue",
                             )
                             break
                     except Exception as exc:  # noqa: BLE001 - transient; retry next run
