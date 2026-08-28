@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from aggregator.config import load_feeds
 from aggregator.models import Article
+from aggregator.parse import MAX_AGE_DAYS
 from aggregator.state import load_state, save_state, select_new, MAX_IDS
 
 
@@ -47,33 +48,36 @@ def test_cap_applies_per_target_not_across_targets(tmp_path):
     assert state["quiet"]["seen"] == quiet         # a busy target cannot evict a quiet one
 
 
-# 1308 is the real window size, reconstructed from this repo's history: the
-# first production seed (2026-07-09, commit c94fa2c) wrote 1308 ids across the
-# 14 live feeds, reproduced the same day after a manual reset. Per feed that is
-# 1308 / 14 ~= 93. A cap below the live window silently discards ids at seed
-# time. Don't lower MAX_IDS without confronting this measurement.
-IDS_PER_FEED = 93
+# Superseded: IDS_PER_FEED = 93 came from the 2026-07-09 seed, which wrote 1308
+# ids across 14 feeds that shipped their whole archives. parse.MAX_AGE_DAYS
+# ended that regime — a feed can now only contribute what it published inside
+# the window, however deep its archive goes.
+#
+# 5/day/feed is the bound, applied uniformly to every feed. That is already the
+# safety margin: the measured worst case in the current list is simonw at
+# 3.7/day (reconstructed from this repo's state.json history) and the average is
+# 0.6/day. Multiplying a uniform 5 by every feed is why there is no further
+# fudge factor here.
+MAX_ARTICLES_PER_FEED_PER_DAY = 5
 
-# Adding a feed now appends its whole window to `seen` at seed time, so the cap
-# must clear not just today's feeds but the ones added before anyone next looks
-# at this constant. Sized to let the feed list roughly double untouched.
+# Sized to let the feed list roughly double before anyone looks at this again.
 GROWTH_HEADROOM_FEEDS = 15
 
 
-def test_max_ids_clears_the_window_of_the_current_feeds():
-    """Pinned to feeds.yaml, not to a frozen count: a cap asserted against 14
-    feeds falls silent exactly as feeds are added, which is when it matters."""
+def test_max_ids_clears_the_age_window_of_the_current_feeds():
+    """Pinned to feeds.yaml, not a frozen count: a cap asserted against a fixed
+    number falls silent exactly as feeds are added, which is when it matters."""
     live_feeds = len(load_feeds("feeds.yaml"))
 
-    assert MAX_IDS > live_feeds * IDS_PER_FEED * 1.5
+    assert MAX_IDS > live_feeds * MAX_ARTICLES_PER_FEED_PER_DAY * MAX_AGE_DAYS
 
 
 def test_max_ids_leaves_room_to_grow_the_feed_list():
-    """Without headroom the cap evicts ids still inside the live RSS window and
-    the channel reposts — silently, and only after the feed is already added."""
+    """Without headroom the cap evicts ids still inside the age window and the
+    channel reposts — silently, and only after the feed is already added."""
     live_feeds = len(load_feeds("feeds.yaml"))
 
-    assert MAX_IDS > (live_feeds + GROWTH_HEADROOM_FEEDS) * IDS_PER_FEED * 1.5
+    assert MAX_IDS > (live_feeds + GROWTH_HEADROOM_FEEDS) * MAX_ARTICLES_PER_FEED_PER_DAY * MAX_AGE_DAYS
 
 
 def test_select_new_filters_seen():
