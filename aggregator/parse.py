@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import feedparser
@@ -88,27 +89,34 @@ def _published(entry) -> datetime | None:
     return None
 
 
+class ParseResult(NamedTuple):
+    articles: list[Article]
+    undated: int   # entries dropped because no date could be recovered
+
+
 def parse_feed(
     content: bytes, source: FeedSource, *, cutoff: datetime | None = None
-) -> list[Article]:
+) -> ParseResult:
     if cutoff is None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     parsed = feedparser.parse(content)
     if parsed.bozo:
         log.warning("bozo feed %s: %s", source.url, parsed.get("bozo_exception"))
     articles: list[Article] = []
+    undated = 0
     for entry in parsed.entries:
         url = entry.get("link", "")
         if not url:
             continue
         published = _published(entry)
         if published is None:
-            # Kept, not dropped: silently discarding an article is the worse
-            # failure, and this is the one entry the cutoff cannot judge. Every
-            # feed in feeds.yaml dates every entry today, so this warns loudly
-            # if one stops.
-            log.warning("undated entry in %s: %s", source.url, url)
-        elif published < cutoff:
+            # Dropped, not kept: an undated entry bypasses the cutoff, and the
+            # cutoff is what makes an archive dump unrepresentable. This
+            # `continue` is the only thing making Article.published non-optional.
+            log.warning("unparseable or missing date in %s: %s (entry dropped)", source.url, url)
+            undated += 1
+            continue
+        if published < cutoff:
             continue
         articles.append(
             Article(
@@ -122,4 +130,4 @@ def parse_feed(
                 summary=clean_summary(entry.get("summary", "")),
             )
         )
-    return articles
+    return ParseResult(articles, undated)

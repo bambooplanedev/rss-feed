@@ -10,7 +10,7 @@ from . import sinks
 from .config import load_feeds, load_targets
 from .fetch import fetch_feed
 from .models import Article, FeedSource
-from .parse import parse_feed
+from .parse import ParseResult, parse_feed
 from .state import load_state, save_state, select_new
 
 log = logging.getLogger("aggregator")
@@ -24,15 +24,31 @@ _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 MAX_SENDS_PER_RUN = 20
 
 
-def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> list[Article]:
+def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> tuple[list[Article], list[str]]:
+    """Returns the articles and the tags of feeds that failed this run.
+
+    A feed that returned entries but no datable ones counts as failed. Dropping
+    those entries is right, but it is invisible: `failed` is what turns it into
+    a non-zero exit instead of a warning nobody reads.
+    """
     articles: list[Article] = []
+    failed: list[str] = []
     for feed in feeds:
         try:
             content = fetch_feed(feed.url, client)
-            articles.extend(parse_feed(content, feed))
+            result = parse_feed(content, feed)
         except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the run
             log.warning("feed failed: %s (%s)", feed.url, exc)
-    return articles
+            failed.append(feed.tag)
+            continue
+        if result.undated and not result.articles:
+            log.error(
+                "feed %s produced %d entries and no usable dates; nothing from it "
+                "can reach a target", feed.url, result.undated,
+            )
+            failed.append(feed.tag)
+        articles.extend(result.articles)
+    return articles, failed
 
 
 def _migrate(state: dict, all_tags: set[str]) -> dict[str, dict]:
@@ -77,10 +93,10 @@ def run(
     feeds = load_feeds(feeds_path)
 
     with httpx.Client() as client:
-        articles = collect_articles(feeds, client)
+        articles, feed_failures = collect_articles(feeds, client)
 
     state = _migrate(load_state(state_path), {f.tag for f in feeds})
-    failed: list[str] = list(skipped)
+    failed: list[str] = list(skipped) + feed_failures
     sent: dict[str, int] = {}
 
     with httpx.Client() as client:

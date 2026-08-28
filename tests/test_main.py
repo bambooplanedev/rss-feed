@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import aggregator.main as m
-from aggregator.models import Article
+from aggregator.models import Article, FeedSource
 from aggregator.sinks import PermanentSendError, TargetDeadError
 from aggregator.state import load_state, save_state
 
@@ -30,7 +30,7 @@ def _feeds(*tags):
 def _setup(tmp_path, targets_yaml, articles, monkeypatch, feeds_yaml=FEEDS):
     (tmp_path / "feeds.yaml").write_text(feeds_yaml, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(targets_yaml, encoding="utf-8")
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: articles)
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: (articles, []))
     return dict(
         feeds_path=str(tmp_path / "feeds.yaml"),
         targets_path=str(tmp_path / "targets.yaml"),
@@ -81,7 +81,7 @@ def test_articles_are_fetched_once_for_all_targets(tmp_path, monkeypatch):
 
     def counting_collect(feeds, client):
         calls["n"] += 1
-        return [_article("a")]
+        return [_article("a")], []
 
     (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
@@ -272,9 +272,33 @@ def test_dry_run_validates_the_config(tmp_path, monkeypatch):
         m.run(**kw, dry_run=True)
 
 
-def test_collect_articles_isolates_failing_feed(monkeypatch):
-    from aggregator.models import FeedSource
+def test_a_feed_with_entries_but_no_dated_ones_fails_the_run(monkeypatch):
+    """A feed that silently vanishes from the channel must be a red run, not a
+    log line — this repo had a feed dead for 29 days that nobody noticed."""
+    feeds = [FeedSource(name="undated", url="https://ex.com/f", tag="undated", tier=1)]
 
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(m, "parse_feed", lambda content, source: m.ParseResult([], undated=3))
+
+    articles, failed = m.collect_articles(feeds, client=None)
+
+    assert articles == []
+    assert "undated" in failed
+
+
+def test_a_feed_with_no_entries_at_all_does_not_fail_the_run(monkeypatch):
+    """A quiet feed is not a broken one. eugeneyan published nothing for 30 days."""
+    feeds = [FeedSource(name="quiet", url="https://ex.com/f", tag="quiet", tier=1)]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(m, "parse_feed", lambda content, source: m.ParseResult([], undated=0))
+
+    articles, failed = m.collect_articles(feeds, client=None)
+
+    assert failed == []
+
+
+def test_collect_articles_isolates_failing_feed(monkeypatch):
     feeds = [
         FeedSource(name="bad", url="https://ex.com/bad", tag="s", tier=1),
         FeedSource(name="good", url="https://ex.com/good", tag="s", tier=1),
@@ -287,12 +311,12 @@ def test_collect_articles_isolates_failing_feed(monkeypatch):
         return b"content"
 
     def fake_parse(content, source):
-        return good_articles if source.name == "good" else []
+        return m.ParseResult(good_articles, undated=0) if source.name == "good" else m.ParseResult([], undated=0)
 
     monkeypatch.setattr(m, "fetch_feed", fake_fetch)
     monkeypatch.setattr(m, "parse_feed", fake_parse)
 
-    articles = m.collect_articles(feeds, client=None)
+    articles, failed = m.collect_articles(feeds, client=None)
 
     assert articles == good_articles
 
@@ -304,7 +328,7 @@ def test_main_exits_nonzero_when_a_target_fails(tmp_path, monkeypatch):
         "targets:\n  - name: dead\n    type: discord\n    url: ${GONE_HOOK}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [])
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], []))
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -324,7 +348,7 @@ def test_main_exits_nonzero_when_a_target_fails(tmp_path, monkeypatch):
 def test_main_does_not_exit_on_a_clean_run(tmp_path, monkeypatch):
     (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: [])
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], []))
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -358,7 +382,7 @@ def test_feed_that_yielded_nothing_is_seeded_on_a_later_run(tmp_path, monkeypatc
 
     both = [_article("a1", tag="alpha"), _article("b1", tag="beta"),
             _article("b2", tag="beta")]
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: both)
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: (both, []))
     m.run(**kw)                                    # beta recovers
 
     assert sent == []                              # seeded, not dumped
@@ -375,7 +399,7 @@ def test_feed_added_later_seeds_silently(tmp_path, monkeypatch):
     (tmp_path / "feeds.yaml").write_text(_feeds("alpha", "beta"), encoding="utf-8")
     monkeypatch.setattr(
         m, "collect_articles",
-        lambda feeds, client: [_article("a1", tag="alpha"), _article("b1", tag="beta")],
+        lambda feeds, client: ([_article("a1", tag="alpha"), _article("b1", tag="beta")], []),
     )
     m.run(**kw)
 
