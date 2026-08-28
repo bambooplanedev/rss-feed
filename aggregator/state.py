@@ -4,21 +4,27 @@ from pathlib import Path
 from .models import Article
 
 # Per target, not per file: a shared cap would let a busy target evict a quiet
-# target's ids and cause silent reposts. The cap must exceed the RSS window with
-# headroom: the measured window is 1308 ids across 14 feeds (first production
-# seed, 2026-07-09), so ~93 ids per feed. A cap below the window discards ids at
-# seed time, so select_new finds hundreds of "new" articles that were really
-# already published, and a channel reposts its backlog indefinitely.
+# target's ids and cause silent reposts. The cap must exceed what the feed list
+# can put in the age window with headroom: parse.MAX_AGE_DAYS caps what any one
+# feed contributes to `seen` at 30 days of its own publication rate, not its
+# whole archive, so the bound is per-feed-per-day, not per-feed-total. A cap
+# below that window discards ids still inside it, so select_new finds "new"
+# articles that were really already published, and a channel reposts its
+# backlog indefinitely.
 #
-# Sized for ~30 feeds at 1.5x that rate. Adding a feed appends its entire window
-# to `seen` at seed time, so headroom is consumed per feed added, not per article
-# delivered; at the old cap of 2000 six added feeds were enough to start evicting
-# live ids. test_state.py pins both properties to feeds.yaml so the cap fails
-# loudly when the feed list outgrows it, rather than after the reposts land.
+# Sized at 5 articles/feed/day, uniform across the list, with headroom for the
+# feed list to roughly double before anyone needs to revisit this. 5/day is
+# already a safety margin above the measured worst case (simonw at 3.7/day; the
+# list averages 0.6/day). Past the cutoff, `seen` grows with what's delivered,
+# not with what's added — a feed added today only ever seeds its own window, so
+# headroom is consumed by accumulation over time, not by the act of adding a
+# feed. test_state.py pins both the window and the headroom to feeds.yaml so the
+# cap fails loudly when the feed list outgrows it, rather than after the
+# reposts land.
 #
-# This is a ceiling, not an allocation — `seen` is ~1440 ids today. Reaching it
-# is not free: state.json is committed twice a day, so a `seen` near this cap is
-# a ~300KB single-line blob per run. Fix that before growing the feed list far.
+# This is a ceiling, not an allocation — `seen` is 153 ids today. Reaching it is
+# not free: state.json is committed twice a day, so a `seen` near this cap is a
+# large single-line blob per run. Fix that before growing the feed list far.
 MAX_IDS = 5000
 
 
