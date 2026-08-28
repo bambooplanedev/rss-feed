@@ -92,6 +92,7 @@ def _published(entry) -> datetime | None:
 class ParseResult(NamedTuple):
     articles: list[Article]
     undated: int   # entries dropped because no date could be recovered
+    dated: int = 0  # entries that yielded a usable date, before the cutoff is applied
 
 
 def parse_feed(
@@ -104,6 +105,7 @@ def parse_feed(
         log.warning("bozo feed %s: %s", source.url, parsed.get("bozo_exception"))
     articles: list[Article] = []
     undated = 0
+    dated = 0
     for entry in parsed.entries:
         url = entry.get("link", "")
         if not url:
@@ -116,6 +118,7 @@ def parse_feed(
             log.warning("unparseable or missing date in %s: %s (entry dropped)", source.url, url)
             undated += 1
             continue
+        dated += 1
         if published < cutoff:
             continue
         articles.append(
@@ -130,4 +133,4 @@ def parse_feed(
                 summary=clean_summary(entry.get("summary", "")),
             )
         )
-    return ParseResult(articles, undated)
+    return ParseResult(articles, undated, dated)

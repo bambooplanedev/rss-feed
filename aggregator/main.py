@@ -49,7 +49,7 @@ def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> tuple[lis
             log.warning("feed failed: %s (%s)", feed.url, exc)
             failed.append(feed.tag)
             continue
-        if result.undated and not result.articles:
+        if result.undated and not result.dated:
             log.error(
                 "feed %s produced %d entries and no usable dates; nothing from it "
                 "can reach a target", feed.url, result.undated,

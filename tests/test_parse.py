@@ -107,7 +107,10 @@ def test_parse_drops_entries_with_no_date_element_at_all():
 
 def test_no_article_from_parse_feed_ever_has_a_null_published():
     """The single guarantee behind Article.published being non-optional."""
-    for name in ("rss_sample.xml", "atom_sample.xml", "guid_change_sample.xml", "malformed_dated.xml"):
+    for name in (
+        "rss_sample.xml", "atom_sample.xml", "guid_change_sample.xml",
+        "malformed_dated.xml", "malformed.xml",
+    ):
         result = parse_feed((FIX / name).read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
         assert all(a.published is not None for a in result.articles), name
 

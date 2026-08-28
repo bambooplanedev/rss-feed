@@ -397,6 +397,56 @@ def test_a_feed_with_no_entries_at_all_does_not_fail_the_run(monkeypatch):
     assert failed == []
 
 
+def test_a_feed_with_old_dated_entries_and_one_undated_is_not_escalated(monkeypatch):
+    """Two properly dated entries older than the cutoff plus one hand-rolled
+    undated entry is a healthy, quiet feed, not a failed one: escalation must
+    key on whether anything got a date at all, not on whether anything
+    survived the age cutoff."""
+    feeds = [FeedSource(name="quiet", url="https://ex.com/f", tag="quiet", tier=1)]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(
+        m, "parse_feed", lambda content, source: m.ParseResult([], undated=1, dated=2)
+    )
+
+    articles, failed = m.collect_articles(feeds, client=None)
+
+    assert "quiet" not in failed
+
+
+def test_a_feed_that_is_entirely_undated_is_still_escalated(monkeypatch):
+    feeds = [FeedSource(name="broken", url="https://ex.com/f", tag="broken", tier=1)]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(
+        m, "parse_feed", lambda content, source: m.ParseResult([], undated=3, dated=0)
+    )
+
+    articles, failed = m.collect_articles(feeds, client=None)
+
+    assert "broken" in failed
+
+
+def test_feed_failures_reach_runs_failed_list(tmp_path, monkeypatch):
+    """The third link in parse -> collect_articles -> run -> main -> exit 1.
+    Every other `_setup`-based test hardcodes collect_articles to return no
+    feed failures, so this is the only test that would notice `+ feed_failures`
+    being dropped from run()'s `failed` list."""
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], ["undated"]))
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+
+    _, failed = m.run(
+        feeds_path=str(tmp_path / "feeds.yaml"),
+        targets_path=str(tmp_path / "targets.yaml"),
+        state_path=str(tmp_path / "state.json"),
+        sleep=lambda _: None,
+    )
+
+    assert "undated" in failed
+
+
 def test_collect_articles_isolates_failing_feed(monkeypatch):
     feeds = [
         FeedSource(name="bad", url="https://ex.com/bad", tag="s", tier=1),
