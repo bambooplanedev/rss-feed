@@ -81,3 +81,17 @@ def test_max_ids_per_feed_clears_the_largest_bucket_committed():
     # max() raise ValueError instead of failing the assertion.
     largest = max((len(ids) for seen in buckets for ids in seen.values()), default=0)
     assert MAX_IDS_PER_FEED > largest
+
+
+def test_save_state_writes_keys_sorted(tmp_path):
+    """Bucket keys are created from a set (main.run's `fresh`, _migrate's
+    `seeded`), so their insertion order rides on PYTHONHASHSEED. state.json is
+    committed on every run — sorting keeps the diff to what actually changed."""
+    path = str(tmp_path / "state.json")
+    save_state(path, {"z": {"seen": {"b": ["1"], "a": ["2"]}}, "a": {"seen": {}}})
+
+    raw = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    assert raw.index('"a"') < raw.index('"z"')
+    assert raw.index('"a": ["2"]') < raw.index('"b": ["1"]')
+    assert load_state(path)["z"]["seen"]["a"] == ["2"]      # id order untouched

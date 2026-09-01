@@ -1,9 +1,11 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aggregator.models import FeedSource
-from aggregator.parse import parse_feed, normalize_url, clean_summary
+from aggregator.parse import (
+    MAX_AGE_DAYS, clean_summary, cutoff_now, normalize_url, parse_feed,
+)
 
 TESTS_DIR = Path(__file__).parent
 
@@ -115,10 +117,14 @@ def test_no_article_from_parse_feed_ever_has_a_null_published():
         assert all(a.published is not None for a in result.articles), name
 
 
-def test_parse_applies_the_default_cutoff_when_none_is_given():
-    """Pins that the default is actually wired up. The fixtures are dated
-    2026-07-02 and only recede further past MAX_AGE_DAYS as time passes."""
-    assert parse_feed((FIX / "rss_sample.xml").read_bytes(), SOURCE).articles == []
+def test_cutoff_now_is_max_age_days_behind_the_current_moment():
+    """parse_feed has no default cutoff any more: one cutoff is computed per
+    run and threaded down, so every feed in a run is bounded by the same
+    instant rather than by whenever its own fetch happened to finish."""
+    before = datetime.now(timezone.utc)
+    cutoff = cutoff_now()
+    assert before - timedelta(days=MAX_AGE_DAYS) <= cutoff
+    assert cutoff <= datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
 
 
 def test_a_changed_guid_format_does_not_produce_a_duplicate():
@@ -205,3 +211,4 @@ def test_parse_reports_bozo_for_a_malformed_document():
 def test_parse_reports_not_bozo_for_a_clean_document():
     result = parse_feed((FIX / "rss_sample.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
     assert result.bozo is False
+

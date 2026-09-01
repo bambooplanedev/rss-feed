@@ -110,11 +110,20 @@ class ParseResult(NamedTuple):
     # the false positive on a quiet feed that this field exists to prevent.
 
 
+def cutoff_now() -> datetime:
+    """The age bound for one run.
+
+    Required, not defaulted inside parse_feed: a per-feed default made a run of
+    sixteen sequential fetches apply sixteen slightly different cutoffs, so an
+    article on the boundary was admitted or dropped depending on how long the
+    preceding feeds took. run() computes this once and threads it down.
+    """
+    return datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
+
+
 def parse_feed(
-    content: bytes, source: FeedSource, *, cutoff: datetime | None = None
+    content: bytes, source: FeedSource, *, cutoff: datetime
 ) -> ParseResult:
-    if cutoff is None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     parsed = feedparser.parse(content)
     if parsed.bozo:
         log.warning("bozo feed %s: %s", source.url, parsed.get("bozo_exception"))

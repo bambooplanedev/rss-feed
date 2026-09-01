@@ -11,6 +11,10 @@ from aggregator.state import load_state, save_state
 
 FEEDS = "feeds:\n  - name: S\n    url: https://ex.com/feed\n    tag: s\n    tier: 1\n"
 
+# run() computes one of these per run and threads it down; collect_articles
+# only passes it through, so any fixed instant does here.
+CUTOFF = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
 
 def _article(id_, hour=9, tier=1, tag="s"):
     return Article(
@@ -31,7 +35,7 @@ def _setup(tmp_path, targets_yaml, articles, monkeypatch, feeds_yaml=FEEDS, ok=(
     (tmp_path / "feeds.yaml").write_text(feeds_yaml, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(targets_yaml, encoding="utf-8")
     monkeypatch.setattr(m, "collect_articles",
-                        lambda feeds, client: m.CollectResult(articles, [], list(ok)))
+                        lambda feeds, client, cutoff: m.CollectResult(articles, [], list(ok)))
     return dict(
         feeds_path=str(tmp_path / "feeds.yaml"),
         targets_path=str(tmp_path / "targets.yaml"),
@@ -258,7 +262,7 @@ def test_filters_route_different_articles_to_different_targets(tmp_path, monkeyp
 def test_articles_are_fetched_once_for_all_targets(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    def counting_collect(feeds, client):
+    def counting_collect(feeds, client, cutoff):
         calls["n"] += 1
         return [_article("a")], [], []
 
@@ -580,9 +584,9 @@ def test_a_feed_with_entries_but_no_dated_ones_fails_the_run(monkeypatch):
     feeds = [FeedSource(name="undated", url="https://ex.com/f", tag="undated", tier=1)]
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
-    monkeypatch.setattr(m, "parse_feed", lambda content, source: m.ParseResult([], undated=3, dated=0, bozo=False))
+    monkeypatch.setattr(m, "parse_feed", lambda content, source, cutoff: m.ParseResult([], undated=3, dated=0, bozo=False))
 
-    articles, failed, _ = m.collect_articles(feeds, client=None)
+    articles, failed, _ = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert articles == []
     assert "undated" in failed
@@ -597,11 +601,11 @@ def test_a_feed_offering_more_than_the_warn_threshold_logs_a_warning(monkeypatch
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(m, "parse_feed",
-                        lambda content, source: m.ParseResult(articles, undated=0,
+                        lambda content, source, cutoff: m.ParseResult(articles, undated=0,
                                                                dated=len(articles), bozo=False))
 
     with caplog.at_level("WARNING", logger="aggregator"):
-        m.collect_articles(feeds, client=None)
+        m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     [record] = [r for r in caplog.records if "busy" in r.message]
     assert str(m.OFFER_WARN_THRESHOLD + 1) in record.message
@@ -613,11 +617,11 @@ def test_a_feed_at_or_below_the_warn_threshold_does_not_warn(monkeypatch, caplog
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(m, "parse_feed",
-                        lambda content, source: m.ParseResult(articles, undated=0,
+                        lambda content, source, cutoff: m.ParseResult(articles, undated=0,
                                                                dated=len(articles), bozo=False))
 
     with caplog.at_level("WARNING", logger="aggregator"):
-        m.collect_articles(feeds, client=None)
+        m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert caplog.records == []
 
@@ -627,9 +631,9 @@ def test_a_feed_with_no_entries_at_all_does_not_fail_the_run(monkeypatch):
     feeds = [FeedSource(name="quiet", url="https://ex.com/f", tag="quiet", tier=1)]
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
-    monkeypatch.setattr(m, "parse_feed", lambda content, source: m.ParseResult([], undated=0, dated=0, bozo=False))
+    monkeypatch.setattr(m, "parse_feed", lambda content, source, cutoff: m.ParseResult([], undated=0, dated=0, bozo=False))
 
-    articles, failed, _ = m.collect_articles(feeds, client=None)
+    articles, failed, _ = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert failed == []
 
@@ -643,10 +647,10 @@ def test_a_feed_with_old_dated_entries_and_one_undated_is_not_escalated(monkeypa
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(
-        m, "parse_feed", lambda content, source: m.ParseResult([], undated=1, dated=2, bozo=False)
+        m, "parse_feed", lambda content, source, cutoff: m.ParseResult([], undated=1, dated=2, bozo=False)
     )
 
-    articles, failed, _ = m.collect_articles(feeds, client=None)
+    articles, failed, _ = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert "quiet" not in failed
 
@@ -656,10 +660,10 @@ def test_a_feed_that_is_entirely_undated_is_still_escalated(monkeypatch):
 
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(
-        m, "parse_feed", lambda content, source: m.ParseResult([], undated=3, dated=0, bozo=False)
+        m, "parse_feed", lambda content, source, cutoff: m.ParseResult([], undated=3, dated=0, bozo=False)
     )
 
-    articles, failed, _ = m.collect_articles(feeds, client=None)
+    articles, failed, _ = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert "broken" in failed
 
@@ -668,9 +672,9 @@ def test_a_clean_feed_is_reported_ok(monkeypatch):
     feeds = [FeedSource(name="clean", url="https://ex.com/f", tag="clean", tier=1)]
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(m, "parse_feed",
-                        lambda content, source: m.ParseResult([_article("a")], 0, 1, False))
+                        lambda content, source, cutoff: m.ParseResult([_article("a")], 0, 1, False))
 
-    result = m.collect_articles(feeds, client=None)
+    result = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert result.ok == ["clean"]
     assert result.failed == []
@@ -682,9 +686,9 @@ def test_a_bozo_feed_is_not_ok_and_not_failed(monkeypatch):
     feeds = [FeedSource(name="bz", url="https://ex.com/f", tag="bz", tier=1)]
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(m, "parse_feed",
-                        lambda content, source: m.ParseResult([_article("a")], 0, 1, True))
+                        lambda content, source, cutoff: m.ParseResult([_article("a")], 0, 1, True))
 
-    result = m.collect_articles(feeds, client=None)
+    result = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert result.ok == []
     assert result.failed == []
@@ -698,7 +702,7 @@ def test_a_feed_that_raises_is_neither_ok_nor_silent(monkeypatch):
 
     monkeypatch.setattr(m, "fetch_feed", blow_up)
 
-    result = m.collect_articles(feeds, client=None)
+    result = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert result.ok == []
     assert "boom" in result.failed
@@ -708,9 +712,9 @@ def test_a_fully_undated_feed_is_failed_and_not_ok(monkeypatch):
     feeds = [FeedSource(name="u", url="https://ex.com/f", tag="u", tier=1)]
     monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
     monkeypatch.setattr(m, "parse_feed",
-                        lambda content, source: m.ParseResult([], 3, 0, False))
+                        lambda content, source, cutoff: m.ParseResult([], 3, 0, False))
 
-    result = m.collect_articles(feeds, client=None)
+    result = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert "u" in result.failed
     assert result.ok == []
@@ -723,7 +727,7 @@ def test_feed_failures_reach_runs_failed_list(tmp_path, monkeypatch):
     being dropped from run()'s `failed` list."""
     (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], ["undated"], []))
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client, cutoff: ([], ["undated"], []))
     monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
 
     _, failed = m.run(
@@ -748,7 +752,7 @@ def test_collect_articles_isolates_failing_feed(monkeypatch):
             raise RuntimeError("connection reset")
         return b"content"
 
-    def fake_parse(content, source):
+    def fake_parse(content, source, cutoff):
         return (
             m.ParseResult(good_articles, undated=0, dated=1, bozo=False)
             if source.name == "good"
@@ -758,7 +762,7 @@ def test_collect_articles_isolates_failing_feed(monkeypatch):
     monkeypatch.setattr(m, "fetch_feed", fake_fetch)
     monkeypatch.setattr(m, "parse_feed", fake_parse)
 
-    articles, failed, _ = m.collect_articles(feeds, client=None)
+    articles, failed, _ = m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert articles == good_articles
 
@@ -770,7 +774,7 @@ def test_main_exits_nonzero_when_a_target_fails(tmp_path, monkeypatch):
         "targets:\n  - name: dead\n    type: discord\n    url: ${GONE_HOOK}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], [], []))
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client, cutoff: ([], [], []))
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -790,7 +794,7 @@ def test_main_exits_nonzero_when_a_target_fails(tmp_path, monkeypatch):
 def test_main_does_not_exit_on_a_clean_run(tmp_path, monkeypatch):
     (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
     (tmp_path / "targets.yaml").write_text(TWO_TARGETS, encoding="utf-8")
-    monkeypatch.setattr(m, "collect_articles", lambda feeds, client: ([], [], []))
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client, cutoff: ([], [], []))
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -826,7 +830,7 @@ def test_feed_that_yielded_nothing_is_seeded_on_a_later_run(tmp_path, monkeypatc
     both = [_article("a1", tag="alpha"), _article("b1", tag="beta"),
             _article("b2", tag="beta")]
     monkeypatch.setattr(m, "collect_articles",
-                        lambda feeds, client: m.CollectResult(both, [], ["alpha", "beta"]))
+                        lambda feeds, client, cutoff: m.CollectResult(both, [], ["alpha", "beta"]))
     m.run(**kw)                                    # beta recovers
 
     assert sent == []                              # seeded, not dumped
@@ -845,7 +849,7 @@ def test_feed_added_later_seeds_silently(tmp_path, monkeypatch):
     (tmp_path / "feeds.yaml").write_text(_feeds("alpha", "beta"), encoding="utf-8")
     monkeypatch.setattr(
         m, "collect_articles",
-        lambda feeds, client: m.CollectResult(
+        lambda feeds, client, cutoff: m.CollectResult(
             [_article("a1", tag="alpha"), _article("b1", tag="beta")], [], ["alpha", "beta"]),
     )
     m.run(**kw)
@@ -942,3 +946,21 @@ def test_seeded_tags_are_pruned_when_a_feed_leaves_feeds_yaml(tmp_path, monkeypa
     m.run(**kw)
 
     assert "gone" not in load_state(kw["state_path"])["core"]["seen"]
+
+
+def test_every_feed_in_a_run_is_bounded_by_the_same_cutoff(monkeypatch):
+    """parse_feed used to compute its own `now() - MAX_AGE_DAYS`, so a run
+    spanning sixteen sequential fetches applied sixteen different cutoffs. An
+    article sitting on the 30-day boundary was then admitted or dropped
+    depending on how long the preceding feeds took."""
+    seen = []
+    feeds = [FeedSource(name=t, url=f"https://ex.com/{t}", tag=t, tier=1)
+             for t in ("a", "b", "c")]
+
+    monkeypatch.setattr(m, "fetch_feed", lambda url, client: b"content")
+    monkeypatch.setattr(m, "parse_feed", lambda content, source, cutoff: (
+        seen.append(cutoff) or m.ParseResult([], 0, 1, False)))
+
+    m.collect_articles(feeds, client=None, cutoff=CUTOFF)
+
+    assert seen == [CUTOFF] * 3

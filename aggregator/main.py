@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime
 from typing import NamedTuple
 
 import httpx
@@ -10,7 +11,7 @@ from . import sinks
 from .config import load_feeds, load_targets
 from .fetch import fetch_feed
 from .models import Article, FeedSource
-from .parse import ParseResult, parse_feed
+from .parse import ParseResult, cutoff_now, parse_feed
 from .state import load_state, save_state, select_new
 
 log = logging.getLogger("aggregator")
@@ -53,14 +54,17 @@ class CollectResult(NamedTuple):
     # the feed holds and nothing may be pruned against it.
 
 
-def collect_articles(feeds: list[FeedSource], client: httpx.Client) -> CollectResult:
+def collect_articles(
+    feeds: list[FeedSource], client: httpx.Client, cutoff: datetime
+) -> CollectResult:
+    """`cutoff` is passed in, not computed per feed: one run, one age bound."""
     articles: list[Article] = []
     failed: list[str] = []
     ok: list[str] = []
     for feed in feeds:
         try:
             content = fetch_feed(feed.url, client)
-            result = parse_feed(content, feed)
+            result = parse_feed(content, feed, cutoff=cutoff)
         except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the run
             log.warning("feed failed: %s (%s)", feed.url, exc)
             failed.append(feed.tag)
@@ -107,7 +111,7 @@ def _migrate(state: dict, articles: list[Article], all_tags: set[str],
         # nothing. Giving it an empty bucket would mean "seeded, remembers
         # nothing", and its whole window would be new.
         seeded = set(entry.get("seeded_tags", ())) & all_tags
-        buckets: dict[str, list[str]] = {t: [] for t in seeded}
+        buckets: dict[str, list[str]] = {t: [] for t in sorted(seeded)}
         orphans: list[str] = []
         for i in seen:
             tag = by_id.get(i)
@@ -122,7 +126,7 @@ def _migrate(state: dict, articles: list[Article], all_tags: set[str],
         # look new. Every orphan was already delivered, so an over-inclusive
         # bucket can only suppress something already sent, and that feed's next
         # clean fetch prunes it back.
-        for tag in seeded - ok_tags:
+        for tag in sorted(seeded - ok_tags):
             buckets[tag].extend(orphans)
         out[name] = {"seen": buckets}
     return out
@@ -143,8 +147,12 @@ def run(
     targets, skipped = load_targets(targets_path, tz)
     feeds = load_feeds(feeds_path)
 
+    # Once per run, before the first fetch. Computed per feed, sixteen
+    # sequential fetches meant sixteen slightly different bounds, and an
+    # article on the 30-day boundary landed on whichever side the clock had
+    # drifted to by the time its feed's turn came.
     with httpx.Client() as client:
-        collected = collect_articles(feeds, client)
+        collected = collect_articles(feeds, client, cutoff_now())
     articles, feed_failures, ok_tags = collected
 
     state = _migrate(load_state(state_path), articles, {f.tag for f in feeds}, set(ok_tags))
@@ -174,7 +182,7 @@ def run(
             entry = state.setdefault(target.name, {"seen": {}})
             buckets = entry["seen"]
 
-            fresh = [t for t in seedable if t not in buckets]
+            fresh = [t for t in sorted(seedable) if t not in buckets]
             if fresh:
                 # Seed in dry-run too. Nothing is persisted — save_state is
                 # skipped below — and seeding in memory is what makes the

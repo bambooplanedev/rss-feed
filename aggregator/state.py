@@ -44,8 +44,14 @@ def save_state(path: str, state: dict[str, dict]) -> None:
         }
         for name, entry in state.items()
     }
+    # sort_keys orders target names and tag keys but leaves the id lists
+    # alone, which is what the [-MAX_IDS_PER_FEED:] slice above depends on.
+    # Those keys are built from sets upstream (run's `fresh`, _migrate's
+    # `seeded`), so without this their order rides on PYTHONHASHSEED and the
+    # committed diff churns for no reason.
     Path(path).write_text(
-        json.dumps({"targets": out}, ensure_ascii=False) + "\n", encoding="utf-8"
+        json.dumps({"targets": out}, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
 
