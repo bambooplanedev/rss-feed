@@ -24,6 +24,12 @@ so a non-English day name or a space-separated timestamp is recovered rather
 than discarded. A feed that yields entries but **no** parseable dates fails the
 run: dropping its articles is right, and doing it quietly is not.
 
+A fetch that fails transiently — 429, 500, 502, 503, 504, or a dropped
+connection — is retried once, two seconds later. Everything else, a 404
+included, fails straight away: the feed is gone and a second request cannot
+bring it back. Without the retry one publisher's hiccup exited the whole run
+non-zero, and a routinely red run is what hides a genuinely dead target.
+
 ## Targets
 
 Edit `targets.yaml` — one entry per destination. Four types:
