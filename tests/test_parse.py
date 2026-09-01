@@ -212,3 +212,16 @@ def test_parse_reports_not_bozo_for_a_clean_document():
     result = parse_feed((FIX / "rss_sample.xml").read_bytes(), SOURCE, cutoff=OLD_CUTOFF)
     assert result.bozo is False
 
+
+def test_normalize_url_keeps_a_param_that_merely_starts_with_ref():
+    """`ref` was matched as a prefix, so `referrer`, `reference` and `refresh`
+    were stripped too. Two distinct URLs then collapse onto one id and the
+    second article is silently never delivered."""
+    assert (
+        normalize_url("https://ex.com/a?referrer=x&reference=7")
+        == "https://ex.com/a?referrer=x&reference=7"
+    )
+
+
+def test_normalize_url_still_strips_a_bare_ref_param():
+    assert normalize_url("https://ex.com/a?ref=hn&id=5") == "https://ex.com/a?id=5"

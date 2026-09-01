@@ -20,7 +20,12 @@ SUMMARY_LIMIT = 300
 # 2026-08-01 and 2026-08-21. Bounding by publication date makes that
 # unrepresentable rather than merely unlikely.
 MAX_AGE_DAYS = 30
-_TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "mc_", "ref")
+# Prefixes are families; the rest are whole parameter names. `ref` was in the
+# prefix tuple, which also swallowed `referrer`, `reference` and `refresh` —
+# two distinct URLs then collapse onto one id and the second article is
+# silently never delivered.
+_TRACKING_PREFIXES = ("utm_", "mc_")
+_TRACKING_PARAMS = frozenset({"fbclid", "gclid", "ref"})
 
 
 class _TextExtractor(HTMLParser):
@@ -52,13 +57,14 @@ def clean_summary(raw: str, limit: int = SUMMARY_LIMIT) -> str:
 # This is the dedup key, not a cosmetic tidy-up. A publisher that changes its
 # guid format — Simon Willison's Atom feed did on 2026-08-13 — otherwise
 # reposts every article still inside its window under a second id.
+def _is_tracking(key: str) -> bool:
+    key = key.lower()
+    return key in _TRACKING_PARAMS or key.startswith(_TRACKING_PREFIXES)
+
+
 def normalize_url(url: str) -> str:
     parts = urlsplit(url.strip())
-    query = [
-        (k, v)
-        for k, v in parse_qsl(parts.query)
-        if not k.lower().startswith(_TRACKING_PREFIXES)
-    ]
+    query = [(k, v) for k, v in parse_qsl(parts.query) if not _is_tracking(k)]
     path = parts.path.rstrip("/") or "/"
     scheme = parts.scheme.lower() or "https"
     netloc = parts.netloc.lower()
