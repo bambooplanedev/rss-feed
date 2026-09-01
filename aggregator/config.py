@@ -13,15 +13,28 @@ log = logging.getLogger(__name__)
 
 def load_feeds(path: str) -> list[FeedSource]:
     with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
+    raw = data.get("feeds") or []
+    if not raw:
+        raise ValueError(f"{path} defines no feeds")
+
     feeds = []
-    for i, s in enumerate(data["feeds"]):
+    for i, s in enumerate(raw):
         missing = [k for k in ("name", "url", "tag", "tier") if k not in s]
         if missing:
             raise ValueError(
                 f"feed #{i} in {path} is missing required field(s): {', '.join(missing)}"
             )
-        feeds.append(FeedSource(name=s["name"], url=s["url"], tag=s["tag"], tier=s["tier"]))
+        # Coerced, not taken as written: `tier: "1"` is a plausible YAML slip
+        # and Target.matches compares tiers with `in`, so a string tier makes a
+        # `tiers:` filter match nothing, deliver nothing, and stay green.
+        try:
+            tier = int(s["tier"])
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"feed #{i} in {path}: tier must be a number, got {s['tier']!r}"
+            ) from None
+        feeds.append(FeedSource(name=s["name"], url=s["url"], tag=s["tag"], tier=tier))
 
     # Per-target seed state keys on `tag`, so two feeds sharing one are
     # indistinguishable there: seeding either marks both seeded and silently

@@ -198,3 +198,42 @@ def test_load_feeds_rejects_duplicate_tags(tmp_path):
 
     with pytest.raises(ValueError, match="dup"):
         load_feeds(str(path))
+
+
+def test_load_feeds_coerces_a_quoted_tier_to_int(tmp_path):
+    """`tier: "1"` is a plausible YAML slip and used to be silent: a target
+    filtering on `tiers: [1, 2]` matched nothing, delivered nothing, and the
+    run stayed green."""
+    p = tmp_path / "feeds.yaml"
+    p.write_text(
+        "feeds:\n  - name: Example\n    url: https://ex.com/feed\n    tag: ex\n"
+        '    tier: "1"\n'
+    )
+    assert load_feeds(str(p))[0].tier == 1
+
+
+def test_load_feeds_rejects_a_tier_that_is_not_a_number(tmp_path):
+    p = tmp_path / "feeds.yaml"
+    p.write_text(
+        "feeds:\n  - name: Example\n    url: https://ex.com/feed\n    tag: ex\n"
+        "    tier: practice\n"
+    )
+    with pytest.raises(ValueError, match="tier"):
+        load_feeds(str(p))
+
+
+def test_load_feeds_rejects_an_empty_file(tmp_path):
+    """load_targets already refuses a file with no targets; this is the same
+    guard one module over. Without it an empty file raised TypeError from
+    inside yaml handling instead of naming the problem."""
+    p = tmp_path / "feeds.yaml"
+    p.write_text("")
+    with pytest.raises(ValueError, match="no feeds"):
+        load_feeds(str(p))
+
+
+def test_load_feeds_rejects_a_file_with_no_feeds_key(tmp_path):
+    p = tmp_path / "feeds.yaml"
+    p.write_text("sources: []\n")
+    with pytest.raises(ValueError, match="no feeds"):
+        load_feeds(str(p))
