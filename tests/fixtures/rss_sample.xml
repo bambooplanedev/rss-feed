@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>Test</title>
+<item>
+  <title>First Post</title>
+  <link>https://ex.com/first</link>
+  <guid>https://ex.com/first</guid>
+  <pubDate>Wed, 02 Jul 2026 09:00:00 GMT</pubDate>
+  <description>This is summary text for first.</description>
+</item>
+<item>
+  <title>Second Post</title>
+  <link>https://ex.com/second</link>
+  <guid>https://ex.com/second</guid>
+  <pubDate>Wed, 02 Jul 2026 10:00:00 GMT</pubDate>
+  <description>Second summary.</description>
+</item>
+</channel></rss>

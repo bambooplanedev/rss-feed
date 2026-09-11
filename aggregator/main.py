@@ -1,0 +1,337 @@
+import argparse
+import logging
+import sys
+import time
+from datetime import datetime
+from typing import NamedTuple
+
+import httpx
+
+from . import sinks
+from .config import load_feeds, load_targets
+from .fetch import fetch_feed
+from .models import Article, FeedSource
+from .parse import ParseResult, cutoff_now, parse_feed
+from .state import load_state, save_state, select_new
+
+log = logging.getLogger("aggregator")
+
+# Bounds a genuine backlog: a target that fell behind, or a feed re-seeding
+# after an outage. It is no longer what absorbs a filter edit — widening
+# `tiers` now seeds the newly matching feeds rather than delivering their
+# backlog, since you widen a filter for future news, not for stale articles.
+MAX_SENDS_PER_RUN = 20
+
+# Telegram answers `chat not found` with HTTP 400, the same code it uses for a
+# malformed message, so the status alone cannot tell a dead target from one bad
+# article. What separates them is shape: a bad article is sporadic, a dead
+# target fails universally. Three failures with no delivery in between ends the
+# target's queue for this run — a stop-hammering rule, not the correctness
+# mechanism. The buffering below is the correctness mechanism.
+#
+# Equal to sinks.MAX_RETRIES by coincidence. Do not unify them; they count
+# different things.
+PERMANENT_FAILURE_STREAK = 3
+
+# The only sensor on state.MAX_IDS_PER_FEED's real invariant: that cap must
+# exceed what a feed can OFFER in one run, not what it publishes in the
+# window, because pruning turns an overflow from a one-off into a permanent
+# repost loop — the evicted ids keep being offered every run after. This
+# threshold is comfortably below MAX_IDS_PER_FEED (500) so an operator sees
+# the warning while a feed is still merely trending toward the cap, not only
+# once it has already blown past it.
+OFFER_WARN_THRESHOLD = 200
+
+
+class CollectResult(NamedTuple):
+    articles: list[Article]
+    failed: list[str]   # tags that make the run exit non-zero
+    ok: list[str]       # tags safe to seed against and prune against
+
+    # `failed` and `ok` are not complements. A bozo feed is in neither: it
+    # parsed something, so it is not worth a red run, but the body may be a
+    # truncated page or an interstitial, so its window is not evidence of what
+    # the feed holds and nothing may be pruned against it.
+
+
+def collect_articles(
+    feeds: list[FeedSource], client: httpx.Client, cutoff: datetime
+) -> CollectResult:
+    """`cutoff` is passed in, not computed per feed: one run, one age bound."""
+    articles: list[Article] = []
+    failed: list[str] = []
+    ok: list[str] = []
+    for feed in feeds:
+        try:
+            content = fetch_feed(feed.url, client)
+            result = parse_feed(content, feed, cutoff=cutoff)
+        except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the run
+            log.warning("feed failed: %s (%s)", feed.url, exc)
+            failed.append(feed.tag)
+            continue
+        if result.undated and not result.dated:
+            log.error(
+                "feed %s produced %d entries and no usable dates; nothing from it "
+                "can reach a target", feed.url, result.undated,
+            )
+            failed.append(feed.tag)
+        elif not result.bozo:
+            ok.append(feed.tag)
+        if len(result.articles) > OFFER_WARN_THRESHOLD:
+            log.warning(
+                "feed %s offered %d articles this run, above the %d early-warning "
+                "threshold; approaching MAX_IDS_PER_FEED risks a permanent repost "
+                "loop once pruning starts evicting ids the feed still offers",
+                feed.tag, len(result.articles), OFFER_WARN_THRESHOLD,
+            )
+        articles.extend(result.articles)
+    return CollectResult(articles, failed, ok)
+
+
+def _migrate(state: dict, articles: list[Article], all_tags: set[str],
+             ok_tags: set[str]) -> dict[str, dict]:
+    """Normalise every entry to {"seen": {tag: [ids]}}.
+
+    Done here rather than in load_state because this is where both the feed list
+    and this run's articles are in scope — which is what makes the conversion
+    guess-free. Each article carries its tag, so a flat id can be filed by
+    matching it against what the feeds actually offered.
+    """
+    by_id = {a.id: a.tag for a in articles}
+    out: dict[str, dict] = {}
+    for name, entry in state.items():
+        entry = entry if isinstance(entry, dict) else {"seen": entry}
+        seen = entry.get("seen", {})
+        if isinstance(seen, dict):
+            out[name] = {"seen": {t: ids for t, ids in seen.items() if t in all_tags}}
+            continue
+
+        # `seeded_tags` is exactly the seeded/unseeded predicate. A tag absent
+        # from it gets NO key, so it seeds on its next clean fetch and sends
+        # nothing. Giving it an empty bucket would mean "seeded, remembers
+        # nothing", and its whole window would be new.
+        seeded = set(entry.get("seeded_tags", ())) & all_tags
+        buckets: dict[str, list[str]] = {t: [] for t in sorted(seeded)}
+        orphans: list[str] = []
+        for i in seen:
+            tag = by_id.get(i)
+            if tag in buckets:
+                buckets[tag].append(i)
+            else:
+                orphans.append(i)
+
+        # An id we cannot attribute belongs to a removed feed, to an article
+        # that has aged out, or to a seeded feed that did not fetch cleanly this
+        # run. Only the last matters: dropping it would make that feed's window
+        # look new. Every orphan was already delivered, so an over-inclusive
+        # bucket can only suppress something already sent, and that feed's next
+        # clean fetch prunes it back.
+        for tag in sorted(seeded - ok_tags):
+            buckets[tag].extend(orphans)
+        out[name] = {"seen": buckets}
+    return out
+
+
+def run(
+    *,
+    feeds_path: str,
+    targets_path: str,
+    state_path: str,
+    tz: str = "UTC",
+    dry_run: bool = False,
+    sleep=time.sleep,
+) -> tuple[dict[str, int], list[str]]:
+    # A malformed config raises here, before any feed is fetched. A target
+    # whose ${VAR} is unset is skipped instead, so a rotated Slack secret
+    # cannot silence Telegram.
+    targets, skipped = load_targets(targets_path, tz)
+    feeds = load_feeds(feeds_path)
+
+    # Once per run, before the first fetch. Computed per feed, sixteen
+    # sequential fetches meant sixteen slightly different bounds, and an
+    # article on the 30-day boundary landed on whichever side the clock had
+    # drifted to by the time its feed's turn came.
+    with httpx.Client() as client:
+        collected = collect_articles(feeds, client, cutoff_now())
+    articles, feed_failures, ok_tags = collected
+
+    state = _migrate(load_state(state_path), articles, {f.tag for f in feeds}, set(ok_tags))
+    failed: list[str] = list(skipped) + feed_failures
+    sent: dict[str, int] = {}
+
+    # Publication order ascending, which is the invariant save_state's
+    # [-MAX_IDS_PER_FEED:] slice depends on. Unfiltered: buckets are per
+    # feed and do not depend on which target's filter currently matches,
+    # so narrowing a filter cannot freeze a bucket. Computed once, outside
+    # the per-target loop below, since neither depends on the target.
+    #
+    # Seed against anything the feed produced; prune only against a
+    # clean fetch. A bozo body is not evidence of the window, so it
+    # cannot prune — but an unseeded bozo feed that yields entries
+    # would otherwise deliver its whole window 20 per run.
+    seedable = set(ok_tags) | {a.tag for a in articles}
+    offered = {
+        tag: [a.id for a in sorted((x for x in articles if x.tag == tag),
+                                   key=lambda x: x.published)]
+        for tag in seedable
+    }
+
+    with httpx.Client() as client:
+        for target in targets:
+            matched = [a for a in articles if target.matches(a)]
+            entry = state.setdefault(target.name, {"seen": {}})
+            buckets = entry["seen"]
+
+            fresh = [t for t in sorted(seedable) if t not in buckets]
+            if fresh:
+                # Seed in dry-run too. Nothing is persisted — save_state is
+                # skipped below — and seeding in memory is what makes the
+                # preview mirror a real run. Without it select_new runs against
+                # unseeded buckets and the preview reports the
+                # MAX_SENDS_PER_RUN ceiling instead of the handful that would
+                # actually go out, which makes the dry-run gate useless.
+                for tag in fresh:
+                    buckets[tag] = list(offered[tag])
+                log.info(
+                    "%starget %s: seeded %d feed(s): %s",
+                    "[dry-run] " if dry_run else "",
+                    target.name, len(fresh), ", ".join(sorted(fresh)),
+                )
+
+            queue = sorted(select_new(matched, buckets), key=lambda a: a.published)
+            if len(queue) > MAX_SENDS_PER_RUN:
+                log.info(
+                    "target %s: %d queued, sending %d, rest next run",
+                    target.name, len(queue), MAX_SENDS_PER_RUN,
+                )
+                queue = queue[:MAX_SENDS_PER_RUN]
+
+            count = 0
+            delivered = False
+            pending: list[tuple[str, str]] = []
+            streak = 0
+            for i, article in enumerate(queue):
+                if dry_run:
+                    print(f"[{target.name}] {sinks.preview(article, target)}")
+                    print("---")
+                    count += 1
+                else:
+                    try:
+                        sinks.send(article, target, client)
+                    except sinks.TargetDeadError as exc:
+                        # Revoked token, kicked bot, deleted webhook. Falling
+                        # through to the transient handler below would work, but
+                        # would tell the operator it retries next run — it never
+                        # heals on its own. Nothing is recorded: the whole queue
+                        # must survive for whoever fixes the credential.
+                        log.error(
+                            "target %s: unreachable (%s); no article recorded, "
+                            "whole queue retries next run",
+                            target.name, exc,
+                        )
+                        failed.append(target.name)
+                        break
+                    except sinks.PermanentSendError as exc:
+                        # Recorded only once this target has proved it can
+                        # deliver. Until then the id stays pending: a rotated
+                        # credential fails every article, and recording those
+                        # destroys the queue an article at a time.
+                        log.error(
+                            "target %s: permanent failure on %s (%s); %s",
+                            target.name, article.url, exc,
+                            "skipping article" if delivered else "holding pending a delivery",
+                        )
+                        failed.append(target.name)
+                        streak += 1
+                        if delivered:
+                            buckets.setdefault(article.tag, []).append(article.id)
+                        else:
+                            pending.append((article.tag, article.id))
+                        if streak >= PERMANENT_FAILURE_STREAK:
+                            log.error(
+                                "target %s: %d consecutive permanent failures; treating as "
+                                "unreachable, %s retries next run",
+                                target.name, streak,
+                                "the rest of the queue" if delivered else "the whole queue",
+                            )
+                            break
+                    except Exception as exc:  # noqa: BLE001 - transient; retry next run
+                        log.warning(
+                            "target %s: transient failure on %s (%s); rest next run",
+                            target.name, article.url, exc,
+                        )
+                        failed.append(target.name)
+                        break
+                    else:
+                        # Pending first, then this id: `seen` then follows the
+                        # order articles were attempted, which is what
+                        # save_state's [-MAX_IDS_PER_FEED:] assumes when it
+                        # keeps "the newest".
+                        for tag, i_ in pending:
+                            buckets.setdefault(tag, []).append(i_)
+                        pending.clear()
+                        buckets.setdefault(article.tag, []).append(article.id)
+                        delivered = True
+                        streak = 0
+                        count += 1
+
+                # Loop-scoped so it paces after a permanent failure too, not
+                # just a clean send. Guarded so dry-run doesn't idle, and a
+                # transient failure already `break`s out before this runs.
+                if not dry_run and i < len(queue) - 1:
+                    sleep(sinks.SPECS[target.type].delay)
+
+            if not dry_run:
+                for tag in ok_tags:
+                    if tag not in buckets or not offered[tag]:
+                        # Nothing offered is indistinguishable from a truncated
+                        # body. Never prune a bucket to empty on that evidence.
+                        continue
+                    keep = set(buckets[tag])
+                    pruned = [i for i in offered[tag] if i in keep]
+                    if buckets[tag] and not pruned:
+                        # A partial-truncation body can serve a subset disjoint
+                        # from what's recorded. That is not evidence the feed's
+                        # real window excludes the recorded ids, so a non-empty
+                        # bucket must survive even when nothing in it
+                        # intersects `offered`.
+                        continue
+                    buckets[tag] = pruned
+
+            sent[target.name] = count
+            if not dry_run:
+                save_state(state_path, state)
+
+    return sent, failed
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(description="AI news RSS → messenger aggregator")
+    parser.add_argument("--dry-run", action="store_true", help="print messages, do not send or persist")
+    parser.add_argument("--feeds", default="feeds.yaml")
+    parser.add_argument("--targets", default="targets.yaml")
+    parser.add_argument("--state", default="state.json")
+    parser.add_argument("--tz", default="UTC")
+    args = parser.parse_args()
+
+    sent, failed = run(
+        feeds_path=args.feeds,
+        targets_path=args.targets,
+        state_path=args.state,
+        tz=args.tz,
+        dry_run=args.dry_run,
+    )
+
+    prefix = "[dry-run] would have " if args.dry_run else ""
+    for name, count in sent.items():
+        log.info("%starget %s: %d message(s)", prefix, name, count)
+    if failed:
+        # Exit non-zero so a dead target shows up as a red workflow run
+        # instead of a green one that quietly delivers nothing.
+        log.error("target(s) with failures: %s", ", ".join(sorted(set(failed))))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

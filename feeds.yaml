@@ -1,0 +1,77 @@
+# tier is what the source IS, not how good it is:
+#   1 = practice      hands-on agent/harness engineering, applied LLMs
+#   2 = primary       a lab or platform publishing its own work
+#   3 = research      papers, alignment, and analysis of them
+#
+# Tags must be unique — state.json keeps one seen-id bucket per tag, so two
+# feeds sharing a tag would share a bucket and swallow each other's articles.
+#
+# Every url below was fetched and verified on 2026-08-28: HTTP 200, non-empty,
+# and every entry carrying a parseable publication date. An entry whose date
+# cannot be parsed is dropped, and a feed that yields entries but no parseable
+# dates fails the run — see parse.MAX_AGE_DAYS and collect_articles.
+feeds:
+  - name: Latent Space
+    url: https://www.latent.space/feed
+    tag: latentspace
+    tier: 1
+  - name: Simon Willison
+    url: https://simonwillison.net/atom/everything/
+    tag: simonw
+    tier: 1
+  - name: The New Stack AI
+    url: https://thenewstack.io/category/ai/feed/
+    tag: thenewstack
+    tier: 1
+  - name: Machine Learning Mastery
+    url: https://machinelearningmastery.com/feed/
+    tag: mlmastery
+    tier: 1
+  - name: Outcome School
+    url: https://outcomeschool.com/feed.xml
+    tag: outcomeschool
+    tier: 1
+  - name: Hamel Husain
+    url: https://hamel.dev/index.xml
+    tag: hamel
+    tier: 1
+  - name: Eugene Yan
+    url: https://eugeneyan.com/rss/
+    tag: eugeneyan
+    tier: 1
+  - name: Lilian Weng
+    url: https://lilianweng.github.io/index.xml
+    tag: lilianweng
+    tier: 1
+  - name: Google DeepMind
+    url: https://deepmind.google/blog/rss.xml
+    tag: deepmind
+    tier: 2
+  - name: Hugging Face
+    url: https://huggingface.co/blog/feed.xml
+    tag: hfblog
+    tier: 2
+  - name: Google Research
+    url: https://research.google/blog/rss/
+    tag: googleresearch
+    tier: 2
+  - name: Alignment Forum
+    url: https://www.alignmentforum.org/feed.xml
+    tag: alignmentforum
+    tier: 3
+  - name: Nature Machine Intelligence
+    url: https://www.nature.com/natmachintell.rss
+    tag: naturemi
+    tier: 3
+  - name: Interconnects
+    url: https://www.interconnects.ai/feed
+    tag: interconnects
+    tier: 3
+  - name: Import AI
+    url: https://jack-clark.net/feed/
+    tag: importai
+    tier: 3
+  - name: Sebastian Raschka
+    url: https://magazine.sebastianraschka.com/feed
+    tag: raschka
+    tier: 3

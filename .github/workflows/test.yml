@@ -1,0 +1,25 @@
+name: Tests
+
+on:
+  # state.json is committed by the aggregator twice a day; that push changes
+  # no code and does not need a test run.
+  push:
+    paths-ignore: ["state.json"]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q

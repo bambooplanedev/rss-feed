@@ -1,0 +1,29 @@
+# Delivery targets. Each entry gets its own dedup state under its `name`,
+# so adding a target later starts it from "now" instead of dumping the backlog.
+#
+# ${VAR} is read from the environment at load time. Webhook URLs are secrets:
+# anyone holding one can post to your channel. Keep them in GitHub Secrets.
+#
+# Optional filters on any target:
+#   tiers: [1, 2]           only these feed tiers
+#   tags: [openai]          only these feed tags
+#   exclude_tags: [tds]     everything except these tags
+
+targets:
+  - name: tg-main
+    type: telegram
+    token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+
+  # - name: discord-ai
+  #   type: discord
+  #   url: ${DISCORD_WEBHOOK_URL}
+  #   tiers: [1, 2]
+
+  # - name: slack-team
+  #   type: slack
+  #   url: ${SLACK_WEBHOOK_URL}
+
+  # - name: n8n
+  #   type: webhook
+  #   url: ${N8N_WEBHOOK_URL}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Guid Change</title>
+<entry>
+  <title>Auto Mode</title>
+  <link href="https://simonwillison.net/2026/Aug/8/auto-mode/"/>
+  <id>https://simonwillison.net/2026/Aug/8/auto-mode/#atom-everything</id>
+  <updated>2026-08-12T11:00:00Z</updated>
+  <summary>Published under the old id format.</summary>
+</entry>
+<entry>
+  <title>Auto Mode</title>
+  <link href="https://simonwillison.net/2026/Aug/8/auto-mode"/>
+  <id>https://simonwillison.net/2026/Aug/8/auto-mode/</id>
+  <updated>2026-08-13T11:00:00Z</updated>
+  <summary>The same article after the feed changed its id format.</summary>
+</entry>
+</feed>

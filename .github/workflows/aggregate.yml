@@ -1,0 +1,55 @@
+name: AI News Aggregator
+
+on:
+  schedule:
+    - cron: "17 7,18 * * *"   # 07:17 and 18:17 UTC (off-peak minute; times are approximate)
+  workflow_dispatch: {}         # allow manual runs for testing
+
+permissions:
+  contents: write               # required to commit state.json back
+
+concurrency:
+  group: aggregator             # serialize runs so they never race on state.json
+  cancel-in-progress: false
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run aggregator
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Uncomment alongside the matching entry in targets.yaml:
+          # DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+        run: python -m aggregator.main --tz UTC
+
+      - name: Commit updated state
+        # main.py exits 1 when any target failed/was skipped, so this step
+        # defaults to if: success() and gets skipped — state.json (with the
+        # progress the successful targets made) would never be committed,
+        # and the next run would re-deliver everything already sent.
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "chore: update aggregator state"
+            git pull --rebase --autostash
+            git push
+          fi
