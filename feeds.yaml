@@ -67,10 +67,12 @@ feeds:
     url: https://www.interconnects.ai/feed
     tag: interconnects
     tier: 3
-  - name: Import AI
-    url: https://jack-clark.net/feed/
-    tag: importai
-    tier: 3
+  # Disabled 2026-10-02: WordPress.com rate-limits GitHub runner IPs (HTTP 429)
+  # often enough to turn ~7% of runs red. Re-enabling re-seeds it from "now".
+  # - name: Import AI
+  #   url: https://jack-clark.net/feed/
+  #   tag: importai
+  #   tier: 3
   - name: Sebastian Raschka
     url: https://magazine.sebastianraschka.com/feed
     tag: raschka

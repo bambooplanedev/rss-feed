@@ -964,3 +964,38 @@ def test_every_feed_in_a_run_is_bounded_by_the_same_cutoff(monkeypatch):
     m.collect_articles(feeds, client=None, cutoff=CUTOFF)
 
     assert seen == [CUTOFF] * 3
+
+
+def _run_with_feed_failure(tmp_path, monkeypatch, targets_yaml):
+    (tmp_path / "feeds.yaml").write_text(FEEDS, encoding="utf-8")
+    (tmp_path / "targets.yaml").write_text(targets_yaml, encoding="utf-8")
+    monkeypatch.setattr(m, "collect_articles", lambda feeds, client, cutoff: ([], ["importai"], []))
+    monkeypatch.setattr(m.sinks, "send", lambda a, t, c: None)
+    return m.run(
+        feeds_path=str(tmp_path / "feeds.yaml"),
+        targets_path=str(tmp_path / "targets.yaml"),
+        state_path=str(tmp_path / "state.json"),
+        sleep=lambda _: None,
+    )
+
+
+def test_a_failed_feed_is_not_reported_as_a_failed_target(tmp_path, monkeypatch, caplog):
+    """The log used to say `target(s) with failures: importai` while the only
+    target had delivered fine — sending the operator after the wrong thing."""
+    with caplog.at_level("ERROR", logger="aggregator"):
+        _run_with_feed_failure(tmp_path, monkeypatch, ONE_TARGET)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "feed(s) failed: importai" in messages
+    assert not [msg for msg in messages if "target(s)" in msg]
+
+
+def test_failed_targets_are_reported_without_feed_tags(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("GONE_HOOK", raising=False)
+    dead = "targets:\n  - name: dead\n    type: discord\n    url: ${GONE_HOOK}\n"
+    with caplog.at_level("ERROR", logger="aggregator"):
+        _run_with_feed_failure(tmp_path, monkeypatch, dead)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "feed(s) failed: importai" in messages
+    assert "target(s) with failures: dead" in messages

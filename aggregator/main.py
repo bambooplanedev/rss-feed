@@ -156,7 +156,10 @@ def run(
     articles, feed_failures, ok_tags = collected
 
     state = _migrate(load_state(state_path), articles, {f.tag for f in feeds}, set(ok_tags))
-    failed: list[str] = list(skipped) + feed_failures
+    # Kept apart until the end so the log can name what actually broke: a
+    # failed feed reported as a failed target sends the operator after a
+    # target that delivered fine.
+    target_failures: list[str] = list(skipped)
     sent: dict[str, int] = {}
 
     # Publication order ascending, which is the invariant save_state's
@@ -229,7 +232,7 @@ def run(
                             "whole queue retries next run",
                             target.name, exc,
                         )
-                        failed.append(target.name)
+                        target_failures.append(target.name)
                         break
                     except sinks.PermanentSendError as exc:
                         # Recorded only once this target has proved it can
@@ -241,7 +244,7 @@ def run(
                             target.name, article.url, exc,
                             "skipping article" if delivered else "holding pending a delivery",
                         )
-                        failed.append(target.name)
+                        target_failures.append(target.name)
                         streak += 1
                         if delivered:
                             buckets.setdefault(article.tag, []).append(article.id)
@@ -260,7 +263,7 @@ def run(
                             "target %s: transient failure on %s (%s); rest next run",
                             target.name, article.url, exc,
                         )
-                        failed.append(target.name)
+                        target_failures.append(target.name)
                         break
                     else:
                         # Pending first, then this id: `seen` then follows the
@@ -302,7 +305,11 @@ def run(
             if not dry_run:
                 save_state(state_path, state)
 
-    return sent, failed
+    if feed_failures:
+        log.error("feed(s) failed: %s", ", ".join(sorted(set(feed_failures))))
+    if target_failures:
+        log.error("target(s) with failures: %s", ", ".join(sorted(set(target_failures))))
+    return sent, target_failures + feed_failures
 
 
 def main() -> None:
@@ -328,8 +335,8 @@ def main() -> None:
         log.info("%starget %s: %d message(s)", prefix, name, count)
     if failed:
         # Exit non-zero so a dead target shows up as a red workflow run
-        # instead of a green one that quietly delivers nothing.
-        log.error("target(s) with failures: %s", ", ".join(sorted(set(failed))))
+        # instead of a green one that quietly delivers nothing. run() has
+        # already logged which feeds and which targets failed.
         sys.exit(1)
 
 
