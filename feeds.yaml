@@ -61,14 +61,18 @@ feeds:
     url: https://registerspill.thorstenball.com/feed
     tag: thorstenball
     tier: 1
-  - name: Kent Beck
-    url: https://tidyfirst.substack.com/feed
-    tag: kentbeck
-    tier: 1
-  - name: Addy Osmani
-    url: https://addyo.substack.com/feed
-    tag: addyosmani
-    tier: 1
+  # Disabled 2026-10-22: substack.com answers GitHub runner IPs with HTTP 403
+  # (feed-check run 39777741558), while the same URLs return 200 from a home
+  # connection. Thorsten Ball's Substack on its own domain is not affected.
+  # Re-enabling re-seeds from "now".
+  # - name: Kent Beck
+  #   url: https://tidyfirst.substack.com/feed
+  #   tag: kentbeck
+  #   tier: 1
+  # - name: Addy Osmani
+  #   url: https://addyo.substack.com/feed
+  #   tag: addyosmani
+  #   tier: 1
   - name: Julia Evans
     url: https://jvns.ca/atom.xml
     tag: jvns
