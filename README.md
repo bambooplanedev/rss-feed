@@ -27,6 +27,10 @@ too). `WARN` — a malformed body, some entries undated, or nothing published in
 `--strict`. The verdict depends only on what the servers returned and on the
 date, so the same responses always print the same lines.
 
+`.github/workflows/feed-check.yml` runs the same command every Monday and on
+any push that touches `feeds.yaml`, without `--strict`: a red run there means a
+feed is gone or unparseable, not that it went quiet.
+
 Articles published more than `parse.MAX_AGE_DAYS` (30) days ago are dropped at
 parse time and never reach a target. A feed's RSS window is not its publication
 window — some carry their entire archive — and without this bound an id evicted
