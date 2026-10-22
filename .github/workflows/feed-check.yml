@@ -1,0 +1,33 @@
+name: Feed check
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"        # Mondays 06:41 UTC, before the morning aggregator run
+  push:
+    paths: ["feeds.yaml"]       # a new or edited feed is checked before it is trusted
+  pull_request:
+    paths: ["feeds.yaml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read                # reads feeds.yaml, writes nothing
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Not --strict: a silent feed warns, it does not fail. Eugene Yan and
+      # Lilian Weng go quiet for months by habit, and a check that is red every
+      # week is one nobody reads. Red here means a feed is gone or unparseable.
+      - name: Check feeds
+        run: python -m aggregator.check
