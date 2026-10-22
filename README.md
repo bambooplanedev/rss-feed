@@ -13,6 +13,20 @@ platform publishing its own work), `3` = research (papers, alignment, analysis).
 **Tags must be unique** — seed state is tracked per tag, so two feeds sharing one
 would seed together and swallow each other's articles.
 
+**Check a feed before adding it, and the whole file whenever you like:**
+
+```bash
+.venv/bin/python -m aggregator.check            # feeds.yaml
+.venv/bin/python -m aggregator.check --strict   # warnings fail too
+```
+
+One line per feed, in file order. `FAIL` — no response, any status but 200,
+no entries, or no entry with a parseable date (the last one fails a real run
+too). `WARN` — a malformed body, some entries undated, or nothing published in
+`--silence-days` (90). Exit code is 1 on any `FAIL`, or on any `WARN` with
+`--strict`. The verdict depends only on what the servers returned and on the
+date, so the same responses always print the same lines.
+
 Articles published more than `parse.MAX_AGE_DAYS` (30) days ago are dropped at
 parse time and never reach a target. A feed's RSS window is not its publication
 window — some carry their entire archive — and without this bound an id evicted
