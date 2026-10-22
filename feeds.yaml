@@ -6,10 +6,16 @@
 # Tags must be unique — state.json keeps one seen-id bucket per tag, so two
 # feeds sharing a tag would share a bucket and swallow each other's articles.
 #
-# Every url below was fetched and verified on 2026-08-28: HTTP 200, non-empty,
-# and every entry carrying a parseable publication date. An entry whose date
+# Every url below is checked by `python -m aggregator.check`: HTTP 200,
+# non-empty, and entries carrying a parseable publication date. Run it before
+# adding a feed. First verified by hand on 2026-08-28. An entry whose date
 # cannot be parsed is dropped, and a feed that yields entries but no parseable
 # dates fails the run — see parse.MAX_AGE_DAYS and collect_articles.
+#
+# Removed 2026-10-22: Outcome School, Google DeepMind, Google Research,
+# Alignment Forum, Nature Machine Intelligence. Between them 98 posts since
+# 2026-08-28 and 4 items in the downstream digest, every one "already
+# covered". The practitioner feeds added that day passed aggregator.check.
 feeds:
   - name: Latent Space
     url: https://www.latent.space/feed
@@ -27,10 +33,6 @@ feeds:
     url: https://machinelearningmastery.com/feed/
     tag: mlmastery
     tier: 1
-  - name: Outcome School
-    url: https://outcomeschool.com/feed.xml
-    tag: outcomeschool
-    tier: 1
   - name: Hamel Husain
     url: https://hamel.dev/index.xml
     tag: hamel
@@ -43,26 +45,42 @@ feeds:
     url: https://lilianweng.github.io/index.xml
     tag: lilianweng
     tier: 1
-  - name: Google DeepMind
-    url: https://deepmind.google/blog/rss.xml
-    tag: deepmind
-    tier: 2
+  - name: Martin Fowler
+    url: https://martinfowler.com/feed.atom
+    tag: fowler
+    tier: 1
+  - name: Armin Ronacher
+    url: https://lucumr.pocoo.org/feed.atom
+    tag: ronacher
+    tier: 1
+  - name: Mitchell Hashimoto
+    url: https://mitchellh.com/feed.xml
+    tag: mitchellh
+    tier: 1
+  - name: Thorsten Ball
+    url: https://registerspill.thorstenball.com/feed
+    tag: thorstenball
+    tier: 1
+  - name: Kent Beck
+    url: https://tidyfirst.substack.com/feed
+    tag: kentbeck
+    tier: 1
+  - name: Addy Osmani
+    url: https://addyo.substack.com/feed
+    tag: addyosmani
+    tier: 1
+  - name: Julia Evans
+    url: https://jvns.ca/atom.xml
+    tag: jvns
+    tier: 1
+  - name: Hillel Wayne
+    url: https://buttondown.com/hillelwayne/rss
+    tag: hillelwayne
+    tier: 1
   - name: Hugging Face
     url: https://huggingface.co/blog/feed.xml
     tag: hfblog
     tier: 2
-  - name: Google Research
-    url: https://research.google/blog/rss/
-    tag: googleresearch
-    tier: 2
-  - name: Alignment Forum
-    url: https://www.alignmentforum.org/feed.xml
-    tag: alignmentforum
-    tier: 3
-  - name: Nature Machine Intelligence
-    url: https://www.nature.com/natmachintell.rss
-    tag: naturemi
-    tier: 3
   - name: Interconnects
     url: https://www.interconnects.ai/feed
     tag: interconnects
